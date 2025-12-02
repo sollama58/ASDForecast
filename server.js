@@ -21,12 +21,13 @@ const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
+const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA"; // UPDATED KEY
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
-const FRAME_DURATION = 15 * 60 * 1000; // 15 Minutes in ms
+const FRAME_DURATION = 15 * 60 * 1000; 
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -51,9 +52,6 @@ try {
     if (process.env.SOLANA_WALLET_JSON) {
         houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
         console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
-    } else if (fsSync.existsSync('house-wallet.json')) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
-        console.log(`> [AUTH] Wallet Loaded (File): ${houseKeypair.publicKey.toString()}`);
     } else {
         console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
     }
@@ -115,7 +113,6 @@ async function saveSystemState() {
 
         if (gameState.candleStartTime > 0) {
             const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
-            // EXPLICIT TIMESTAMPS IN SHARDED FILE
             await fs.writeFile(frameFile, JSON.stringify({
                 id: gameState.candleStartTime,
                 startTime: gameState.candleStartTime,
@@ -165,6 +162,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         const balance = await connection.getBalance(houseKeypair.publicKey);
         if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
+        // FLAT MARKET
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
@@ -180,6 +178,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             return;
         }
 
+        // NORMAL MARKET
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
@@ -291,11 +290,10 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
-        // EXPLICIT TIMESTAMPS IN HISTORY
         const frameRecord = {
             id: frameId,
-            startTime: frameId, // Store start
-            endTime: frameId + FRAME_DURATION, // Store end
+            startTime: frameId,
+            endTime: frameId + FRAME_DURATION,
             time: new Date(frameId).toISOString(),
             open: openPrice, 
             close: closePrice, 
@@ -330,10 +328,15 @@ async function closeFrame(closePrice, closeTime) {
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
-                const myShares = userDir === 'UP' ? pos.up : (userDir === 'DOWN' ? pos.down : 0);
+                
+                // SAVE DETAILED SHARES
                 userData.frameLog[frameId] = { 
-                    dir: userDir, result: outcome, time: Date.now(),
-                    shares: myShares, wagered: pos.sol
+                    dir: userDir, 
+                    result: outcome, 
+                    time: Date.now(),
+                    upShares: pos.up,
+                    downShares: pos.down,
+                    wagered: pos.sol
                 };
                 await saveUser(pubKey, userData);
             }));
@@ -350,13 +353,20 @@ async function closeFrame(closePrice, closeTime) {
     } finally { release(); }
 }
 
-// --- ORACLE ---
+// --- ORACLE: COINGECKO ---
 async function updatePrice() {
     try {
-        const response = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
+        // SWITCHED BACK TO COINGECKO
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+            params: { 
+                ids: 'solana', 
+                vs_currencies: 'usd', 
+                x_cg_demo_api_key: COINGECKO_API_KEY 
+            }
+        });
         
-        if (response.data && response.data.price) {
-            const currentPrice = parseFloat(response.data.price);
+        if (response.data.solana) {
+            const currentPrice = response.data.solana.usd;
             
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
@@ -386,7 +396,6 @@ updatePrice();
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
-        // Note: We still calc time left on the fly for the timer countdown
         const now = new Date();
         const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
         const msUntilClose = nextWindowStart - now.getTime();
@@ -419,7 +428,6 @@ app.get('/api/state', async (req, res) => {
             price: gameState.price,
             openPrice: gameState.candleOpen,
             candleStartTime: gameState.candleStartTime,
-            // SEND CALCULATED END TIME
             candleEndTime: gameState.candleStartTime + FRAME_DURATION,
             change: percentChange,
             msUntilClose: msUntilClose,
@@ -515,5 +523,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v32 running on ${PORT}`);
+    console.log(`> ASDForecast Engine v34 (CoinGecko) running on ${PORT}`);
 });
