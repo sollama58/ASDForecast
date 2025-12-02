@@ -31,7 +31,7 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "100.4"; // Race Condition Fix
+const BACKEND_VERSION = "100.5"; // Race Condition Fix
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -401,7 +401,6 @@ async function closeFrame(closePrice, closeTime) {
                 if (rUp > rDown) dir = "UP";
                 else if (rDown > rUp) dir = "DOWN";
                 if (rUp === rDown) dir = "FLAT";
-                
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) payoutTotal = potSol;
@@ -483,10 +482,10 @@ async function updatePrice() {
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
-
-                // 1. RACE CONDITION FIX: If already resetting, don't queue another close
-                if (gameState.isResetting) return;
                 
+                // --- FIXED RACE CONDITION ---
+                if (gameState.isResetting) return; // Already processing close, skip
+
                 if (gameState.isPaused) {
                     if (currentWindowStart > gameState.candleStartTime) {
                         console.log("> [SYS] Unpausing for new Frame.");
@@ -518,11 +517,9 @@ async function updatePrice() {
                         gameState.candleOpen = currentPrice;
                         await saveSystemState();
                     } else {
-                        // 2. SET LOCK IMMEDIATELY
+                        // LOCK AND TRIGGER
                         gameState.isResetting = true; 
                         await saveSystemState();
-                        
-                        // 3. Trigger Async Close (Mutex released here, but isResetting protects re-entry)
                         closeFrame(currentPrice, currentWindowStart);
                     }
                 }
