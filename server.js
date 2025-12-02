@@ -21,36 +21,29 @@ const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
 
 // --- FILE PATHS ---
-const STORAGE_FILE = path.join(__dirname, 'storage.json'); // Current Game State
-const HISTORY_FILE = path.join(__dirname, 'history.json'); // Past Frames
-const USERS_FILE = path.join(__dirname, 'users.json');     // User Stats
+const STORAGE_FILE = path.join(__dirname, 'storage.json'); 
+const HISTORY_FILE = path.join(__dirname, 'history.json'); 
+const USERS_FILE = path.join(__dirname, 'users.json');     
 
 // --- STATE MANAGEMENT ---
 let gameState = {
     price: 0,
     candleOpen: 0,
     candleStartTime: 0,
-    bets: [], // Active bets for current frame
+    bets: [], 
     poolShares: { up: 100, down: 100 } 
 };
 
-let frameHistory = []; // Array of past frames
-let userStats = {};    // Map of PubKey -> Stats
+let frameHistory = []; 
+let userStats = {};    
 
 // --- LOAD DATA ---
 function loadData() {
     try {
-        if (fs.existsSync(STORAGE_FILE)) {
-            const data = JSON.parse(fs.readFileSync(STORAGE_FILE));
-            gameState = { ...gameState, ...data };
-        }
-        if (fs.existsSync(HISTORY_FILE)) {
-            frameHistory = JSON.parse(fs.readFileSync(HISTORY_FILE));
-        }
-        if (fs.existsSync(USERS_FILE)) {
-            userStats = JSON.parse(fs.readFileSync(USERS_FILE));
-        }
-        console.log(`> [SYS] Data Loaded. History: ${frameHistory.length} frames. Users: ${Object.keys(userStats).length}.`);
+        if (fs.existsSync(STORAGE_FILE)) gameState = { ...gameState, ...JSON.parse(fs.readFileSync(STORAGE_FILE)) };
+        if (fs.existsSync(HISTORY_FILE)) frameHistory = JSON.parse(fs.readFileSync(HISTORY_FILE));
+        if (fs.existsSync(USERS_FILE)) userStats = JSON.parse(fs.readFileSync(USERS_FILE));
+        console.log(`> [SYS] Data Loaded. Active Bets: ${gameState.bets.length}. Users: ${Object.keys(userStats).length}`);
     } catch (e) { console.error("Load Error", e); }
 }
 
@@ -77,21 +70,16 @@ function getCurrentWindowStart() {
 function closeFrame(closePrice, closeTime) {
     console.log(`> [SYS] Closing Frame: ${new Date(gameState.candleStartTime).toISOString()}`);
 
-    // 1. Determine Result
     const openPrice = gameState.candleOpen;
     let result = "FLAT";
     if (closePrice > openPrice) result = "UP";
     else if (closePrice < openPrice) result = "DOWN";
 
-    // 2. Calculate Frame Stats
-    // Subtract initial 100 virtual shares to get real volume
     const realSharesUp = Math.max(0, gameState.poolShares.up - 100);
     const realSharesDown = Math.max(0, gameState.poolShares.down - 100);
-    
-    // Calculate Total SOL wagered in this frame
     const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
-    // 3. Archive Frame
+    // Archive Frame
     const frameRecord = {
         id: gameState.candleStartTime,
         time: new Date(gameState.candleStartTime).toISOString(),
@@ -103,54 +91,40 @@ function closeFrame(closePrice, closeTime) {
         totalSol: frameSol
     };
     
-    // Add to history (Keep last 100)
-    frameHistory.unshift(frameRecord); // Add to front
+    frameHistory.unshift(frameRecord); 
     if (frameHistory.length > 100) frameHistory.pop();
 
-    // 4. Update User Stats
-    // Group bets by user to determine their net position for this frame
+    // Determine Winners/Losers Logic
     const frameUserPositions = {}; 
-
     gameState.bets.forEach(bet => {
         if (!frameUserPositions[bet.user]) {
-            frameUserPositions[bet.user] = { upShares: 0, downShares: 0, solWagered: 0 };
+            frameUserPositions[bet.user] = { upShares: 0, downShares: 0 };
         }
         if (bet.direction === 'UP') frameUserPositions[bet.user].upShares += bet.shares;
         else frameUserPositions[bet.user].downShares += bet.shares;
-        
-        frameUserPositions[bet.user].solWagered += bet.costSol;
     });
 
-    // Process outcomes
     for (const [pubKey, pos] of Object.entries(frameUserPositions)) {
-        if (!userStats[pubKey]) {
-            userStats[pubKey] = { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0 };
-        }
-
+        if (!userStats[pubKey]) userStats[pubKey] = { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0 };
+        
         const user = userStats[pubKey];
-        user.totalSol += pos.solWagered;
-        user.framesPlayed += 1;
+        user.framesPlayed += 1; // Increment frames played on close
 
-        // Win Logic: Majority Shares
         let userDirection = "FLAT";
         if (pos.upShares > pos.downShares) userDirection = "UP";
         else if (pos.downShares > pos.upShares) userDirection = "DOWN";
 
         if (userDirection !== "FLAT" && result !== "FLAT") {
-            if (userDirection === result) {
-                user.wins += 1;
-                console.log(`> [WIN] User ${pubKey.slice(0,6)} won (Bet ${userDirection}, Result ${result})`);
-            } else {
-                user.losses += 1;
-            }
+            if (userDirection === result) user.wins += 1;
+            else user.losses += 1;
         }
     }
 
-    // 5. Reset Game State for New Frame
+    // Reset Game State
     gameState.candleStartTime = closeTime;
     gameState.candleOpen = closePrice;
-    gameState.poolShares = { up: 100, down: 100 }; // Reset Liquidity
-    gameState.bets = []; // Clear bets
+    gameState.poolShares = { up: 100, down: 100 }; 
+    gameState.bets = []; 
 
     saveData();
 }
@@ -168,13 +142,10 @@ async function updatePrice() {
             
             const currentWindowStart = getCurrentWindowStart();
             
-            // DETECT FRAME CHANGE
             if (currentWindowStart > gameState.candleStartTime) {
                 if (gameState.candleStartTime !== 0) {
-                    // Close the previous frame using the new price as the "Close"
                     closeFrame(currentPrice, currentWindowStart);
                 } else {
-                    // First run init
                     gameState.candleStartTime = currentWindowStart;
                     gameState.candleOpen = currentPrice;
                     saveData();
@@ -198,12 +169,10 @@ app.get('/api/state', (req, res) => {
     const priceChange = gameState.price - gameState.candleOpen;
     const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
 
-    // Pricing
     const totalShares = gameState.poolShares.up + gameState.poolShares.down;
     const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
     const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
 
-    // Get specific user stats if requested
     const userKey = req.query.user;
     let myStats = null;
     if (userKey && userStats[userKey]) {
@@ -220,7 +189,7 @@ app.get('/api/state', (req, res) => {
             sharesUp: gameState.poolShares.up,
             sharesDown: gameState.poolShares.down
         },
-        history: frameHistory.slice(0, 3), // Send last 3 frames
+        history: frameHistory.slice(0, 3), 
         userStats: myStats
     });
 });
@@ -237,7 +206,6 @@ app.post('/api/verify-bet', async (req, res) => {
         if (!tx) return res.status(404).json({ error: "TX_NOT_FOUND" });
         if (tx.meta.err) return res.status(400).json({ error: "TX_FAILED" });
 
-        // Extract SOL
         let lamports = 0;
         const instructions = tx.transaction.message.instructions;
         for (let ix of instructions) {
@@ -252,7 +220,6 @@ app.post('/api/verify-bet', async (req, res) => {
         if (lamports === 0) return res.status(400).json({ error: "NO_FUNDS" });
         const solAmount = lamports / 1000000000;
 
-        // Calc Shares
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         let price = 0.05; 
         if (direction === 'UP') price = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
@@ -261,14 +228,14 @@ app.post('/api/verify-bet', async (req, res) => {
 
         const sharesReceived = solAmount / price;
 
-        // Update Pool
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
-        // Initialize User if new (so we track them immediately)
+        // --- UPDATE USER STATS IMMEDIATELY ---
         if (!userStats[userPubKey]) {
             userStats[userPubKey] = { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0 };
         }
+        userStats[userPubKey].totalSol += solAmount; // Instant update
 
         gameState.bets.push({
             signature, user: userPubKey, direction,
@@ -276,6 +243,7 @@ app.post('/api/verify-bet', async (req, res) => {
             timestamp: Date.now()
         });
 
+        // --- PERSIST ALL DATA IMMEDIATELY ---
         saveData();
         
         console.log(`> TRADE: ${userPubKey} | ${direction} | ${sharesReceived.toFixed(2)} Shares`);
@@ -288,5 +256,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v2 running on ${PORT}`);
+    console.log(`> ASDForecast Engine v3 running on ${PORT}`);
 });
