@@ -10,14 +10,21 @@ const { Mutex } = require('async-mutex');
 const app = express();
 const stateMutex = new Mutex();
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] })); // Open CORS for Control Panel
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-const ADMIN_SECRET = "admin-secret-123"; // Simple protection for the cancel endpoint
+
+// --- SECURITY: ADMIN PASSWORD ---
+// Must be set in Render Environment Variables
+const ADMIN_SECRET = process.env.ADMIN_ACTION_PASSWORD; 
+
+if (!ADMIN_SECRET) {
+    console.warn("⚠️ [SEC] WARNING: ADMIN_ACTION_PASSWORD is not set. Admin functions will fail.");
+}
 
 // --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
@@ -70,7 +77,7 @@ let gameState = {
     bets: [],
     recentTrades: [],
     sharePriceHistory: [],
-    isPaused: false // New state for cancellation
+    isPaused: false
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, lastASDFSignature: null };
@@ -84,11 +91,15 @@ function loadGlobalState() {
             const loaded = JSON.parse(fsSync.readFileSync(STATS_FILE));
             globalStats = { ...globalStats, ...loaded };
         }
+        
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
             const lines = fileContent.split('\n');
-            lines.slice(-2000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
+            lines.forEach(line => {
+                if(line.trim()) processedSignatures.add(line.trim());
+            });
         }
+
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState.candleOpen = savedState.candleOpen || 0;
@@ -187,42 +198,47 @@ async function processRefunds(bets) {
     const connection = new Connection(SOLANA_NETWORK, 'confirmed');
     console.log(`> [REFUND] Processing ${bets.length} refunds...`);
 
-    // Aggregate to save txs
     const refunds = {};
     let totalFee = 0;
 
     bets.forEach(bet => {
         if (!refunds[bet.user]) refunds[bet.user] = 0;
-        const refundAmt = bet.costSol * 0.99; // 99% Refund
+        const refundAmt = Math.floor(bet.costSol * 0.99 * 1e9); // Calculate in Lamports
         refunds[bet.user] += refundAmt;
-        totalFee += (bet.costSol * 0.01); // 1% Fee
+        totalFee += (bet.costSol * 0.01 * 1e9);
     });
 
     // 1. Send Fee
-    const feeLamports = Math.floor(totalFee * 1e9);
-    if (feeLamports > 0) {
+    if (totalFee > 0) {
         try {
-            const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
+            const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: Math.floor(totalFee) }));
             await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
         } catch(e) { console.error("> [REFUND] Fee Fail", e); }
     }
 
     // 2. Send Refunds
-    const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: Math.floor(amt * 1e9) }));
+    const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: amt }));
     const BATCH_SIZE = 15;
 
     for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
         const tx = new Transaction();
+        let hasInstructions = false;
+        
         batch.forEach(r => {
-            if (r.amount > 0) tx.add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(r.pubKey), lamports: r.amount }));
+            if (r.amount > 5000) { // Dust check
+                tx.add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(r.pubKey), lamports: r.amount }));
+                hasInstructions = true;
+            }
         });
 
-        try {
-            const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
-            console.log(`> [REFUND] Batch Sent: ${sig}`);
-        } catch (e) {
-            console.error(`> [REFUND] Batch Failed: ${e.message}`);
+        if (hasInstructions) {
+            try {
+                const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
+                console.log(`> [REFUND] Batch Sent: ${sig}`);
+            } catch (e) {
+                console.error(`> [REFUND] Batch Failed: ${e.message}`);
+            }
         }
     }
 }
@@ -236,7 +252,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         const balance = await connection.getBalance(houseKeypair.publicKey);
         if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
-        // FLAT MARKET
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
@@ -315,9 +330,8 @@ async function processPayouts(frameId, result, bets, totalVolume) {
                             const uData = await getUser(w.pubKey);
                             if (uData.frameLog && uData.frameLog[frameId]) {
                                 const shareRatio = w.sharesHeld / totalWinningShares;
-                                const payoutSol = (potLamports * shareRatio) / 1e9;
                                 uData.frameLog[frameId].payoutTx = sig;
-                                uData.frameLog[frameId].payoutAmount = payoutSol;
+                                uData.frameLog[frameId].payoutAmount = (potLamports * shareRatio) / 1e9;
                                 await saveUser(w.pubKey, uData);
                             }
                         });
@@ -326,7 +340,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             }
         }
 
-        // SWEEP EXCESS
         try {
             const postPayoutBalance = await connection.getBalance(houseKeypair.publicKey);
             const reserveLamports = SWEEP_TARGET * 1e9; 
@@ -366,26 +379,6 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
-        // CALC WINNER STATS FOR HISTORY
-        let winnerCount = 0;
-        let payoutTotal = 0;
-
-        if (result !== "FLAT") {
-            const potSol = frameSol * 0.94;
-            // Simulating winner count
-            const userPositions = {};
-            gameState.bets.forEach(bet => {
-                if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
-                if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-                else userPositions[bet.user].down += bet.shares;
-            });
-            for (const [pk, pos] of Object.entries(userPositions)) {
-                let dir = pos.up > pos.down ? 'UP' : (pos.down > pos.up ? 'DOWN' : 'FLAT');
-                if (dir === result) winnerCount++;
-            }
-            if (winnerCount > 0) payoutTotal = potSol;
-        }
-
         const frameRecord = {
             id: frameId,
             startTime: frameId,
@@ -396,9 +389,7 @@ async function closeFrame(closePrice, closeTime) {
             result: result,
             sharesUp: realSharesUp, 
             sharesDown: realSharesDown, 
-            totalSol: frameSol,
-            winners: winnerCount, // NEW
-            payout: payoutTotal   // NEW
+            totalSol: frameSol
         };
         historySummary.unshift(frameRecord); 
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
@@ -434,8 +425,6 @@ async function closeFrame(closePrice, closeTime) {
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
-        // If cancelled frame, logic handled by separate endpoint.
-        // This is normal close.
         gameState.candleStartTime = closeTime;
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
@@ -462,18 +451,16 @@ async function updatePrice() {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
                 
-                // IF PAUSED, DO NOT RESET AUTOMATICALLY UNTIL WINDOW MATCHES
+                // PAUSE CHECK: If paused, wait for next natural window start
                 if (gameState.isPaused) {
-                    // Check if we are in a NEW window relative to when it was paused/started?
-                    // Logic: If paused, we wait for next natural window.
                     if (currentWindowStart > gameState.candleStartTime) {
                         console.log("> [SYS] Unpausing for new Frame.");
-                        gameState.isPaused = false; // AUTO UNPAUSE
+                        gameState.isPaused = false; 
                         gameState.candleStartTime = currentWindowStart;
                         gameState.candleOpen = currentPrice;
                         await saveSystemState();
                     }
-                    return; // Skip normal logic while paused
+                    return;
                 }
 
                 if (currentWindowStart > gameState.candleStartTime) {
@@ -484,14 +471,15 @@ async function updatePrice() {
                     }
                 }
 
-                // Snapshot logic...
                 const totalS = gameState.poolShares.up + gameState.poolShares.down;
                 const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
                 const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
+                
                 if (!gameState.sharePriceHistory) gameState.sharePriceHistory = [];
                 gameState.sharePriceHistory.push({ t: Date.now(), up: pUp, down: pDown });
                 const FIVE_MINS = 5 * 60 * 1000;
                 gameState.sharePriceHistory = gameState.sharePriceHistory.filter(x => x.t > Date.now() - FIVE_MINS);
+                
                 await saveSystemState();
             });
             
@@ -508,20 +496,22 @@ async function updatePrice() {
 setInterval(updatePrice, 10000); 
 updatePrice(); 
 
-// --- API ---
+// --- ENDPOINTS ---
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
-        // ... (Same stat calc logic)
         const now = new Date();
         const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
         const msUntilClose = nextWindowStart - now.getTime();
+
         const priceChange = gameState.price - gameState.candleOpen;
         const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
         const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
+
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
+
         const nowTime = Date.now();
         const history = gameState.sharePriceHistory || [];
         const baseline = { up: 0.05, down: 0.05 };
@@ -562,13 +552,8 @@ app.get('/api/state', async (req, res) => {
             currentVolume: currentVolume,
             uniqueUsers: uniqueUsers,
             platformStats: globalStats,
-            isPaused: gameState.isPaused, // SEND PAUSED STATE
-            market: {
-                priceUp, priceDown,
-                sharesUp: gameState.poolShares.up,
-                sharesDown: gameState.poolShares.down,
-                changes: changes
-            },
+            isPaused: gameState.isPaused,
+            market: { priceUp, priceDown, sharesUp: gameState.poolShares.up, sharesDown: gameState.poolShares.down, changes: changes },
             history: historySummary,
             recentTrades: gameState.recentTrades,
             userStats: myStats,
@@ -579,7 +564,6 @@ app.get('/api/state', async (req, res) => {
 
 app.post('/api/verify-bet', async (req, res) => {
     if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
-    // ... (Rest of verify-bet logic remains identical)
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
@@ -608,7 +592,7 @@ app.post('/api/verify-bet', async (req, res) => {
     try {
         if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
         if (txBlockTime < gameState.candleStartTime) return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
-        if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" }); // Double check inside lock
+        if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
 
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         let price = 0.05; 
@@ -625,12 +609,7 @@ app.post('/api/verify-bet', async (req, res) => {
             saveUser(userPubKey, userData);
         });
 
-        gameState.bets.push({
-            signature, user: userPubKey, direction,
-            costSol: solAmount, entryPrice: price, shares: sharesReceived,
-            timestamp: Date.now()
-        });
-
+        gameState.bets.push({ signature, user: userPubKey, direction, costSol: solAmount, entryPrice: price, shares: sharesReceived, timestamp: Date.now() });
         gameState.recentTrades.unshift({ user: userPubKey, direction, shares: sharesReceived, time: Date.now() });
         if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
 
@@ -650,22 +629,19 @@ app.post('/api/verify-bet', async (req, res) => {
 // --- ADMIN: CANCEL FRAME ---
 app.post('/api/admin/cancel-frame', async (req, res) => {
     const auth = req.headers['x-admin-secret'];
-    if (auth !== ADMIN_SECRET) return res.status(403).json({ error: "UNAUTHORIZED" });
+    if (!auth || auth !== ADMIN_SECRET) return res.status(403).json({ error: "UNAUTHORIZED" });
 
     const release = await stateMutex.acquire();
     try {
         if (gameState.bets.length === 0) {
             gameState.isPaused = true;
             await saveSystemState();
-            return res.json({ success: true, message: "Paused. No bets to refund." });
+            return res.json({ success: true, message: "Paused. No bets." });
         }
-
-        console.log(`> [ADMIN] CANCELLING FRAME. Refunding ${gameState.bets.length} bets...`);
         
-        // Snapshot for refund
+        console.log(`> [ADMIN] CANCELLING FRAME. Refunding...`);
         const betsToRefund = [...gameState.bets];
         
-        // Mark as cancelled history
         const frameRecord = {
             id: gameState.candleStartTime,
             time: new Date(gameState.candleStartTime).toISOString(),
@@ -675,23 +651,20 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
         historySummary.unshift(frameRecord);
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
 
-        // Reset State
         gameState.bets = [];
         gameState.poolShares = { up: 50, down: 50 };
-        gameState.isPaused = true; // PAUSE MARKET
+        gameState.isPaused = true; 
         await saveSystemState();
 
-        // Process Refunds (Async)
+        // Trigger Refunds (Async)
         processRefunds(betsToRefund);
 
-        res.json({ success: true, message: "Frame Cancelled. Refunds processing. Market Paused." });
+        res.json({ success: true, message: "Frame Cancelled & Paused." });
 
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "ADMIN_ERROR" });
-    } finally { release(); }
+    } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
+    finally { release(); }
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v53 (Admin Features) running on ${PORT}`);
+    console.log(`> ASDForecast Engine v54 (Admin Auth) running on ${PORT}`);
 });
