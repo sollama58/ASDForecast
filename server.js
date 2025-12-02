@@ -19,6 +19,7 @@ const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
 
+// --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
 const HELIUS_MAINNET_URL = "https://mainnet.helius-rpc.com/?api-key=f171f1e4-6e9a-4295-b4d6-a7b43a968c6a";
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
@@ -28,7 +29,6 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "59.0"; // Version Tag
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -200,10 +200,15 @@ async function processPayoutQueue() {
                 let hasInstructions = false;
                 const validRecipients = [];
                 
-                if (type === 'USER_PAYOUT') {
+                if (type === 'USER_PAYOUT' || type === 'USER_REFUND') {
                     for (const item of recipients) {
                         const uData = await getUser(item.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId] && uData.frameLog[frameId].payoutTx) continue;
+                        // Idempotency Check (Skip if already paid/refunded)
+                        if (uData.frameLog && uData.frameLog[frameId]) {
+                            const entry = uData.frameLog[frameId];
+                            if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
+                            if (type === 'USER_REFUND' && entry.refundTx) continue;
+                        }
                         validRecipients.push(item);
                     }
                 } else {
@@ -223,6 +228,7 @@ async function processPayoutQueue() {
                     if (hasInstructions) {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
                         console.log(`> [QUEUE] Batch Sent: ${sig}`);
+
                         if (type === 'USER_PAYOUT') {
                             for (const item of validRecipients) {
                                 const uData = await getUser(item.pubKey);
@@ -231,6 +237,17 @@ async function processPayoutQueue() {
                                     uData.frameLog[frameId].payoutAmount = item.amount / 1e9;
                                     await saveUser(item.pubKey, uData);
                                 }
+                            }
+                        }
+                        // [NEW] Handle Refund Recording
+                        else if (type === 'USER_REFUND') {
+                            for (const item of validRecipients) {
+                                const uData = await getUser(item.pubKey);
+                                // If log doesn't exist (e.g. first bet of frame cancelled immediately), create stub
+                                if (!uData.frameLog[frameId]) uData.frameLog[frameId] = { result: 'CANCELLED', time: Date.now() };
+                                
+                                uData.frameLog[frameId].refundTx = sig;
+                                await saveUser(item.pubKey, uData);
                             }
                         }
                     }
@@ -303,7 +320,8 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
     processPayoutQueue();
 }
 
-async function processRefunds(bets) {
+// --- UPDATED REFUND LOGIC ---
+async function processRefunds(frameId, bets) {
     if (!houseKeypair || bets.length === 0) return;
     const refunds = {};
     let totalFee = 0;
@@ -315,11 +333,13 @@ async function processRefunds(bets) {
     });
     const queue = [];
     if (totalFee > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: Math.floor(totalFee) }] });
+    
     const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: amt }));
     const BATCH_SIZE = 15;
     for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
-        queue.push({ type: 'USER_PAYOUT', frameId: 'REFUND', recipients: batch }); 
+        // Pass actual frameId here, but use USER_REFUND type for queue handler logic
+        queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch }); 
     }
     let existingQueue = [];
     try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
@@ -372,6 +392,7 @@ async function closeFrame(closePrice, closeTime) {
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
 
         const betsSnapshot = [...gameState.bets];
+
         const userPositions = {};
         betsSnapshot.forEach(bet => {
             if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
@@ -416,6 +437,7 @@ async function closeFrame(closePrice, closeTime) {
     } finally { release(); }
 }
 
+// --- ORACLE ---
 async function updatePrice() {
     try {
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
@@ -470,38 +492,32 @@ setInterval(updatePrice, 10000);
 updatePrice(); 
 processPayoutQueue();
 
+// --- ENDPOINTS ---
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
         const now = new Date();
         const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
         const msUntilClose = nextWindowStart - now.getTime();
-
         const priceChange = gameState.price - gameState.candleOpen;
         const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
         const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
-
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-
         const nowTime = Date.now();
         const history = gameState.sharePriceHistory || [];
         const baseline = { up: 0.05, down: 0.05 };
         const oneMinAgo = history.find(x => x.t >= nowTime - 60000) || baseline;
         const fiveMinAgo = history.find(x => x.t >= nowTime - 300000) || baseline;
         function getPercentChange(current, old) { if (!old || old === 0) return 0; return ((current - old) / old) * 100; }
-        const changes = {
-            up1m: getPercentChange(priceUp, oneMinAgo.up),
-            up5m: getPercentChange(priceUp, fiveMinAgo.up),
-            down1m: getPercentChange(priceDown, oneMinAgo.down),
-            down5m: getPercentChange(priceDown, fiveMinAgo.down),
-        };
+        const changes = { up1m: getPercentChange(priceUp, oneMinAgo.up), up5m: getPercentChange(priceUp, fiveMinAgo.up), down1m: getPercentChange(priceDown, oneMinAgo.down), down5m: getPercentChange(priceDown, fiveMinAgo.down), };
         const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
         
         const userKey = req.query.user;
         let myStats = null;
         let activePosition = null;
+
         if (userKey) {
             myStats = await getUser(userKey);
             const userBets = gameState.bets.filter(b => b.user === userKey);
@@ -518,8 +534,7 @@ app.get('/api/state', async (req, res) => {
             change: percentChange, msUntilClose: msUntilClose, currentVolume: currentVolume, uniqueUsers: uniqueUsers,
             platformStats: globalStats, isPaused: gameState.isPaused,
             market: { priceUp, priceDown, sharesUp: gameState.poolShares.up, sharesDown: gameState.poolShares.down, changes: changes },
-            history: historySummary, recentTrades: gameState.recentTrades, userStats: myStats, activePosition: activePosition,
-            backendVersion: BACKEND_VERSION
+            history: historySummary, recentTrades: gameState.recentTrades, userStats: myStats, activePosition: activePosition 
         });
     } finally { release(); }
 });
@@ -578,7 +593,6 @@ app.post('/api/verify-bet', async (req, res) => {
         globalStats.totalVolume += solAmount;
         processedSignatures.add(signature);
         await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
-
         await saveSystemState();
         res.json({ success: true, shares: sharesReceived, price: price });
 
@@ -603,11 +617,13 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
             gameState.bets = [];
             gameState.poolShares = { up: 50, down: 50 };
             await saveSystemState();
-            processRefunds(betsToRefund);
+            
+            // Pass frame ID for logging refunds to user files
+            processRefunds(gameState.candleStartTime, betsToRefund);
         }
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
     finally { release(); }
 });
 
-app.listen(PORT, () => { console.log(`> ASDForecast Engine v59 (Final) running on ${PORT}`); });
+app.listen(PORT, () => { console.log(`> ASDForecast Engine v60 (Refund Link) running on ${PORT}`); });
