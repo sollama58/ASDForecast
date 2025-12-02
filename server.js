@@ -2,13 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction } = require('@solana/web3.js');
 const axios = require('axios');
-const fs = require('fs').promises; // Async
-const fsSync = require('fs');      // Sync
+const fs = require('fs').promises; 
+const fsSync = require('fs');      
 const path = require('path');
 const { Mutex } = require('async-mutex');
 
 const app = express();
-const stateMutex = new Mutex(); // Locked ONLY for State writes, not Network calls
+const stateMutex = new Mutex();
 
 app.use(cors({
     origin: 'https://www.alonisthe.dev',
@@ -22,6 +22,7 @@ const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
+const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const RESERVE_SOL = 0.02;
 
@@ -38,8 +39,9 @@ if (!fsSync.existsSync(USERS_DIR)) fsSync.mkdirSync(USERS_DIR);
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
+const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); // CHANGED: .log extension implies text stream
 
-console.log(`> [SYS] High-Performance Engine Active. Root: ${DATA_DIR}`);
+console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
 // --- KEY MANAGEMENT ---
 let houseKeypair;
@@ -47,11 +49,8 @@ try {
     if (process.env.SOLANA_WALLET_JSON) {
         houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
         console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
-    } else if (fsSync.existsSync('house-wallet.json')) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
-        console.log(`> [AUTH] Wallet Loaded (File): ${houseKeypair.publicKey.toString()}`);
     } else {
-        console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
+        console.warn("> [WARN] NO PRIVATE KEY ENV VAR FOUND. PAYOUTS DISABLED.");
     }
 } catch (e) { console.error("> [ERR] Wallet Load Failed:", e.message); }
 
@@ -60,31 +59,41 @@ let gameState = {
     price: 0,
     candleOpen: 0,
     candleStartTime: 0,
-    poolShares: { up: 50, down: 50 },
+    poolShares: { up: 100, down: 100 },
     bets: [],
     recentTrades: []
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0 };
+let processedSignatures = new Set(); 
 
-// --- I/O (Optimized) ---
+// --- I/O (OPTIMIZED) ---
 function loadGlobalState() {
     try {
         if (fsSync.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fsSync.readFileSync(HISTORY_FILE));
         if (fsSync.existsSync(STATS_FILE)) globalStats = JSON.parse(fsSync.readFileSync(STATS_FILE));
         
+        // [SCALABILITY FIX] Read Signatures Line-by-Line
+        if (fsSync.existsSync(SIGS_FILE)) {
+            const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
+            const lines = fileContent.split('\n');
+            lines.forEach(line => {
+                if(line.trim()) processedSignatures.add(line.trim());
+            });
+            console.log(`> [SEC] Loaded ${processedSignatures.size} signatures from Append-Log.`);
+        }
+
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState.candleOpen = savedState.candleOpen || 0;
             gameState.candleStartTime = savedState.candleStartTime || 0;
-            gameState.poolShares = savedState.poolShares || { up: 50, down: 50 };
+            gameState.poolShares = savedState.poolShares || { up: 100, down: 100 };
             gameState.recentTrades = savedState.recentTrades || [];
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             if (fsSync.existsSync(currentFrameFile)) {
                 const frameData = JSON.parse(fsSync.readFileSync(currentFrameFile));
                 gameState.bets = frameData.bets || [];
-                // We trust the State file for poolShares to ensure continuity
             }
         }
     } catch (e) { console.error("> [ERR] Load Error:", e); }
@@ -92,7 +101,6 @@ function loadGlobalState() {
 
 async function saveSystemState() {
     try {
-        // Write State
         await fs.writeFile(STATE_FILE, JSON.stringify({
             candleOpen: gameState.candleOpen,
             candleStartTime: gameState.candleStartTime,
@@ -100,17 +108,15 @@ async function saveSystemState() {
             recentTrades: gameState.recentTrades
         }));
         
-        // Write Global Stats
         await fs.writeFile(STATS_FILE, JSON.stringify(globalStats));
 
-        // Write Current Frame Detail
         if (gameState.candleStartTime > 0) {
             const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             await fs.writeFile(frameFile, JSON.stringify({
                 id: gameState.candleStartTime,
                 open: gameState.candleOpen,
                 poolShares: gameState.poolShares,
-                bets: [...gameState.bets] // Copy array
+                bets: [...gameState.bets]
             }));
         }
     } catch (e) { console.error("> [ERR] Save Error:", e); }
@@ -143,11 +149,9 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
-// --- PAYOUT ENGINE (BACKGROUND PROCESS) ---
+// --- PAYOUT ENGINE ---
 async function processPayouts(frameId, result, bets, totalVolume) {
     if (!houseKeypair || totalVolume === 0) return;
-
-    // Create a separate connection instance for payouts to avoid congestion
     const connection = new Connection(SOLANA_NETWORK, 'confirmed');
     console.log(`> [PAYOUT] Frame ${frameId} | Result: ${result} | Vol: ${totalVolume.toFixed(4)} SOL`);
 
@@ -155,33 +159,27 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         const balance = await connection.getBalance(houseKeypair.publicKey);
         if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
-        // --- FLAT MARKET ---
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
                 try {
                     const burnTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: burnLamports }));
                     await sendAndConfirmTransaction(connection, burnTx, [houseKeypair]);
-                    
-                    // Update Global Stats (Locking briefly for stats only)
                     await stateMutex.runExclusive(async () => {
                         globalStats.totalFees += (burnLamports / 1e9);
                         await saveSystemState();
                     });
-                    
                     console.log(`> [BURN] 99% Burn Executed.`);
                 } catch (e) { console.error("> [BURN] Error:", e.message); }
             }
             return;
         }
 
-        // --- NORMAL MARKET ---
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
                 const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
                 await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
-                
                 await stateMutex.runExclusive(async () => {
                     globalStats.totalFees += (feeLamports / 1e9);
                     await saveSystemState();
@@ -237,8 +235,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             if (hasInstructions) {
                 try {
                     const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
-                    
-                    // Record Payouts (Async - does not block main thread)
                     batch.forEach(async (w) => {
                         const uData = await getUser(w.pubKey);
                         if (uData.frameLog && uData.frameLog[frameId]) {
@@ -256,9 +252,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
 
 // --- FRAME CLOSING ---
 async function closeFrame(closePrice, closeTime) {
-    // CRITICAL: Acquire lock to snapshot state and reset
     const release = await stateMutex.acquire(); 
-    
     try {
         const frameId = gameState.candleStartTime; 
         console.log(`> [SYS] Closing Frame: ${frameId}`);
@@ -280,10 +274,10 @@ async function closeFrame(closePrice, closeTime) {
         historySummary.unshift(frameRecord); 
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
 
-        // Snapshot bets for payout processing before clearing them
+        // Snapshot Bets
         const betsSnapshot = [...gameState.bets];
 
-        // Update User Stats (Batch I/O)
+        // Update Users (Batch)
         const userPositions = {};
         betsSnapshot.forEach(bet => {
             if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
@@ -309,14 +303,13 @@ async function closeFrame(closePrice, closeTime) {
             }));
         }
 
-        // Reset State *Immediately*
         gameState.candleStartTime = closeTime;
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
         await saveSystemState();
 
-        // Trigger Payouts in Background (Pass snapshot)
+        // Payouts (Background)
         processPayouts(frameId, result, betsSnapshot, frameSol);
         
     } finally { release(); }
@@ -325,7 +318,6 @@ async function closeFrame(closePrice, closeTime) {
 // --- ORACLE ---
 async function updatePrice() {
     try {
-        // 1. Fetch Price (NO LOCK) - High Concurrency Safe
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
             params: { ids: 'solana', vs_currencies: 'usd', x_cg_demo_api_key: COINGECKO_API_KEY }
         });
@@ -333,33 +325,21 @@ async function updatePrice() {
         if (response.data.solana) {
             const currentPrice = response.data.solana.usd;
             
-            // 2. Update Price State (Fast Lock)
-            let shouldClose = false;
-            let nextWindow = 0;
-
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
-                
-                // Detect Frame Transition
                 if (currentWindowStart > gameState.candleStartTime) {
                     if (gameState.candleStartTime === 0) {
-                        // First boot
                         gameState.candleStartTime = currentWindowStart;
                         gameState.candleOpen = currentPrice;
                         await saveSystemState();
-                    } else {
-                        // Frame needs closing
-                        shouldClose = true;
-                        nextWindow = currentWindowStart;
                     }
                 }
             });
             
-            // 3. Close Frame (If needed) - Handled outside the Price Update Lock
-            // closeFrame acquires its own lock to ensure atomic reset
-            if (shouldClose) {
-                await closeFrame(currentPrice, nextWindow);
+            const currentWindowStart = getCurrentWindowStart();
+            if (currentWindowStart > gameState.candleStartTime && gameState.candleStartTime !== 0) {
+                await closeFrame(currentPrice, currentWindowStart);
             }
         }
     } catch (e) { console.log("Oracle unstable"); }
@@ -371,7 +351,6 @@ updatePrice();
 // --- ENDPOINTS ---
 
 app.get('/api/state', async (req, res) => {
-    // Read-Lock to ensure we don't read half-reset state
     const release = await stateMutex.acquire();
     try {
         const now = new Date();
@@ -390,8 +369,6 @@ app.get('/api/state', async (req, res) => {
         let myStats = null;
         let activePosition = null;
 
-        // Reading User Data does not need Main State Lock, but we do it here for simplicity
-        // Optimization: Move getUser out of mutex if user files get large
         if (userKey) {
             myStats = await getUser(userKey);
             const userBets = gameState.bets.filter(b => b.user === userKey);
@@ -428,16 +405,19 @@ app.post('/api/verify-bet', async (req, res) => {
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
 
-    // 1. NETWORK TASK (NO LOCK) - High Scalability
+    // [SCALABILITY FIX] CHECK SIGNATURE BEFORE NETWORK CALL
+    if (processedSignatures.has(signature)) {
+        return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
+    }
+
     let solAmount = 0;
     let txBlockTime = 0;
     try {
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
         const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
         if (!tx || tx.meta.err) return res.status(400).json({ error: "TX_INVALID" });
-
-        // Get Block Time to prevent Late Bets
-        txBlockTime = tx.blockTime * 1000; // Convert to ms
+        
+        txBlockTime = tx.blockTime * 1000;
 
         let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
         const instructions = tx.transaction.message.instructions;
@@ -452,19 +432,14 @@ app.post('/api/verify-bet', async (req, res) => {
         if (solAmount === 0) return res.status(400).json({ error: "NO_FUNDS" });
     } catch (e) { return res.status(500).json({ error: "CHAIN_ERROR" }); }
 
-    // 2. STATE UPDATE (FAST LOCK)
     const release = await stateMutex.acquire();
     try {
-        // Timestamp Validation:
-        // If the transaction happened BEFORE the current frame started, it's too late (or too early).
-        // Ideally, we accept it if it's > candleStartTime.
+        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
+        
+        // [SCALABILITY FIX] Strict Timestamp Check
         if (txBlockTime < gameState.candleStartTime) {
-            // Edge Case: User bet right at 11:59:59, Frame closed at 12:00:00.
-            // Verification ran at 12:00:05.
-            // Current Logic: We reject it to keep state clean.
-            // Production Logic: We would add it to the *previous* frame's payout pool and re-run payouts (Complex).
-            // For this Beta: We accept it into the CURRENT frame to ensure they get shares.
-            console.warn(`> [WARN] Late Bet detected (BlockTime: ${txBlockTime} < Start: ${gameState.candleStartTime}). Accepting into current frame.`);
+            console.warn(`> [SEC] Rejected Stale Bet: ${signature}`);
+            return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
         }
 
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
@@ -478,7 +453,7 @@ app.post('/api/verify-bet', async (req, res) => {
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
-        // Async User Update (Don't await)
+        // Async User Update
         getUser(userPubKey).then(userData => {
             userData.totalSol += solAmount;
             saveUser(userPubKey, userData);
@@ -489,12 +464,16 @@ app.post('/api/verify-bet', async (req, res) => {
             costSol: solAmount, entryPrice: price, shares: sharesReceived,
             timestamp: Date.now()
         });
-        
-        // Update Ticker
+
         gameState.recentTrades.unshift({ user: userPubKey, direction, shares: sharesReceived, time: Date.now() });
         if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
 
         globalStats.totalVolume += solAmount;
+        
+        // [SCALABILITY FIX] Append-Only Logging
+        processedSignatures.add(signature);
+        await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
+
         await saveSystemState();
         
         res.json({ success: true, shares: sharesReceived, price: price });
@@ -506,5 +485,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast High-Concurrency Engine v2 running on ${PORT}`);
+    console.log(`> ASDForecast High-Perf Engine v27 running on ${PORT}`);
 });
