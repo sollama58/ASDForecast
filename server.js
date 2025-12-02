@@ -49,6 +49,9 @@ try {
     if (process.env.SOLANA_WALLET_JSON) {
         houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
         console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
+    } else if (fsSync.existsSync('house-wallet.json')) {
+        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
+        console.log(`> [AUTH] Wallet Loaded (File): ${houseKeypair.publicKey.toString()}`);
     } else {
         console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
     }
@@ -61,7 +64,8 @@ let gameState = {
     candleStartTime: 0,
     poolShares: { up: 50, down: 50 },
     bets: [],
-    recentTrades: []
+    recentTrades: [],
+    sharePriceHistory: [] // New: Track price over time for 1m/5m calc
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0 };
@@ -87,6 +91,7 @@ function loadGlobalState() {
             gameState.candleStartTime = savedState.candleStartTime || 0;
             gameState.poolShares = savedState.poolShares || { up: 50, down: 50 };
             gameState.recentTrades = savedState.recentTrades || [];
+            gameState.sharePriceHistory = savedState.sharePriceHistory || [];
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             if (fsSync.existsSync(currentFrameFile)) {
@@ -103,7 +108,8 @@ async function saveSystemState() {
             candleOpen: gameState.candleOpen,
             candleStartTime: gameState.candleStartTime,
             poolShares: gameState.poolShares,
-            recentTrades: gameState.recentTrades
+            recentTrades: gameState.recentTrades,
+            sharePriceHistory: gameState.sharePriceHistory
         }));
         
         await fs.writeFile(STATS_FILE, JSON.stringify(globalStats));
@@ -273,13 +279,12 @@ async function closeFrame(closePrice, closeTime) {
 
         const betsSnapshot = [...gameState.bets];
 
-        // Update Users (Batch)
         const userPositions = {};
         betsSnapshot.forEach(bet => {
             if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
             if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
             else userPositions[bet.user].down += bet.shares;
-            userPositions[bet.user].sol += bet.costSol; // Track SOL per frame per user
+            userPositions[bet.user].sol += bet.costSol;
         });
 
         const usersToUpdate = Object.entries(userPositions);
@@ -289,26 +294,17 @@ async function closeFrame(closePrice, closeTime) {
             await Promise.all(batch.map(async ([pubKey, pos]) => {
                 const userData = await getUser(pubKey);
                 userData.framesPlayed += 1;
-                
                 let userDir = "FLAT";
                 if (pos.up > pos.down) userDir = "UP";
                 else if (pos.down > pos.up) userDir = "DOWN";
-
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
-                
                 if (!userData.frameLog) userData.frameLog = {};
-                
-                // UPDATED: SAVE DETAILED STATS FOR THIS FRAME
                 const myShares = userDir === 'UP' ? pos.up : (userDir === 'DOWN' ? pos.down : 0);
                 userData.frameLog[frameId] = { 
-                    dir: userDir, 
-                    result: outcome, 
-                    time: Date.now(),
-                    shares: myShares,   // Log Shares
-                    wagered: pos.sol    // Log SOL Cost
+                    dir: userDir, result: outcome, time: Date.now(),
+                    shares: myShares, wagered: pos.sol
                 };
-                
                 await saveUser(pubKey, userData);
             }));
         }
@@ -317,6 +313,7 @@ async function closeFrame(closePrice, closeTime) {
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
+        gameState.sharePriceHistory = []; // Reset price history for new frame
         await saveSystemState();
 
         processPayouts(frameId, result, betsSnapshot, frameSol);
@@ -324,7 +321,7 @@ async function closeFrame(closePrice, closeTime) {
     } finally { release(); }
 }
 
-// --- ORACLE ---
+// --- ORACLE & SHARE PRICE SNAPSHOTS ---
 async function updatePrice() {
     try {
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
@@ -337,6 +334,7 @@ async function updatePrice() {
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
+                
                 if (currentWindowStart > gameState.candleStartTime) {
                     if (gameState.candleStartTime === 0) {
                         gameState.candleStartTime = currentWindowStart;
@@ -344,6 +342,24 @@ async function updatePrice() {
                         await saveSystemState();
                     }
                 }
+
+                // --- SHARE PRICE SNAPSHOT (EVERY 10s) ---
+                const totalS = gameState.poolShares.up + gameState.poolShares.down;
+                const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
+                const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
+                
+                gameState.sharePriceHistory.push({
+                    t: Date.now(),
+                    up: pUp,
+                    down: pDown
+                });
+
+                // Prune history > 5 mins
+                const FIVE_MINS = 5 * 60 * 1000;
+                gameState.sharePriceHistory = gameState.sharePriceHistory.filter(x => x.t > Date.now() - FIVE_MINS);
+                
+                // Save changes (throttled save would be better but this is safe)
+                await saveSystemState();
             });
             
             const currentWindowStart = getCurrentWindowStart();
@@ -357,8 +373,13 @@ async function updatePrice() {
 setInterval(updatePrice, 10000); 
 updatePrice(); 
 
-// --- ENDPOINTS ---
+// --- HELPER: Calc Change ---
+function getPercentChange(current, old) {
+    if (!old || old === 0) return 0;
+    return ((current - old) / old) * 100;
+}
 
+// --- ENDPOINTS ---
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
@@ -373,6 +394,18 @@ app.get('/api/state', async (req, res) => {
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
+
+        // --- HISTORICAL CHANGE CALCULATION ---
+        const nowTime = Date.now();
+        const oneMinAgo = gameState.sharePriceHistory.find(x => x.t >= nowTime - 60000);
+        const fiveMinAgo = gameState.sharePriceHistory.find(x => x.t >= nowTime - 300000);
+
+        const changes = {
+            up1m: oneMinAgo ? getPercentChange(priceUp, oneMinAgo.up) : 0,
+            up5m: fiveMinAgo ? getPercentChange(priceUp, fiveMinAgo.up) : 0,
+            down1m: oneMinAgo ? getPercentChange(priceDown, oneMinAgo.down) : 0,
+            down5m: fiveMinAgo ? getPercentChange(priceDown, fiveMinAgo.down) : 0,
+        };
 
         const userKey = req.query.user;
         let myStats = null;
@@ -393,7 +426,6 @@ app.get('/api/state', async (req, res) => {
         res.json({
             price: gameState.price,
             openPrice: gameState.candleOpen,
-            candleStartTime: gameState.candleStartTime, // Send start time
             change: percentChange,
             msUntilClose: msUntilClose,
             currentVolume: currentVolume,
@@ -401,7 +433,8 @@ app.get('/api/state', async (req, res) => {
             market: {
                 priceUp, priceDown,
                 sharesUp: gameState.poolShares.up,
-                sharesDown: gameState.poolShares.down
+                sharesDown: gameState.poolShares.down,
+                changes: changes // Send calculated changes
             },
             history: historySummary,
             recentTrades: gameState.recentTrades,
@@ -415,7 +448,9 @@ app.post('/api/verify-bet', async (req, res) => {
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
 
-    if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX" });
+    if (processedSignatures.has(signature)) {
+        return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
+    }
 
     let solAmount = 0;
     let txBlockTime = 0;
@@ -440,8 +475,11 @@ app.post('/api/verify-bet', async (req, res) => {
 
     const release = await stateMutex.acquire();
     try {
-        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX" });
-        if (txBlockTime < gameState.candleStartTime) return res.status(400).json({ error: "TX_EXPIRED" });
+        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
+        if (txBlockTime < gameState.candleStartTime) {
+            console.warn(`> [SEC] Rejected Stale Bet: ${signature}`);
+            return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
+        }
 
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         let price = 0.05; 
@@ -483,5 +521,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v27 running on ${PORT}`);
+    console.log(`> ASDForecast High-Perf Engine v28 running on ${PORT}`);
 });
