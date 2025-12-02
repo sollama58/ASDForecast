@@ -2,8 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction } = require('@solana/web3.js');
 const axios = require('axios');
-const fs = require('fs').promises; 
-const fsSync = require('fs');      
+const fs = require('fs').promises; // Async
+const fsSync = require('fs');      // Sync
 const path = require('path');
 const { Mutex } = require('async-mutex');
 
@@ -20,11 +20,13 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
+const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq"); // NEW UPKEEP WALLET
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
-const RESERVE_SOL = 0.02;
+const RESERVE_SOL = 0.02; // Hard stop limit
+const SWEEP_TARGET = 0.05; // Target balance after sweep
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -64,8 +66,7 @@ let gameState = {
     candleStartTime: 0,
     poolShares: { up: 50, down: 50 },
     bets: [],
-    recentTrades: [],
-    sharePriceHistory: [] // New: Track price over time for 1m/5m calc
+    recentTrades: []
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0 };
@@ -91,7 +92,6 @@ function loadGlobalState() {
             gameState.candleStartTime = savedState.candleStartTime || 0;
             gameState.poolShares = savedState.poolShares || { up: 50, down: 50 };
             gameState.recentTrades = savedState.recentTrades || [];
-            gameState.sharePriceHistory = savedState.sharePriceHistory || [];
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             if (fsSync.existsSync(currentFrameFile)) {
@@ -108,8 +108,7 @@ async function saveSystemState() {
             candleOpen: gameState.candleOpen,
             candleStartTime: gameState.candleStartTime,
             poolShares: gameState.poolShares,
-            recentTrades: gameState.recentTrades,
-            sharePriceHistory: gameState.sharePriceHistory
+            recentTrades: gameState.recentTrades
         }));
         
         await fs.writeFile(STATS_FILE, JSON.stringify(globalStats));
@@ -157,12 +156,13 @@ function getCurrentWindowStart() {
 async function processPayouts(frameId, result, bets, totalVolume) {
     if (!houseKeypair || totalVolume === 0) return;
     const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-    console.log(`> [PAYOUT] Frame ${frameId} | Vol: ${totalVolume.toFixed(4)} SOL`);
+    console.log(`> [PAYOUT] Frame ${frameId} | Result: ${result} | Vol: ${totalVolume.toFixed(4)} SOL`);
 
     try {
         const balance = await connection.getBalance(houseKeypair.publicKey);
-        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low.");
+        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
+        // 1. HANDLE FLAT MARKET
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
@@ -178,6 +178,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             return;
         }
 
+        // 2. HANDLE FEES
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
@@ -190,6 +191,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             } catch (e) {}
         }
 
+        // 3. DISTRIBUTE WINNINGS
         const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
         const userPositions = {};
         bets.forEach(bet => {
@@ -213,43 +215,74 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             }
         }
 
-        if (totalWinningShares === 0) return;
+        if (totalWinningShares > 0) {
+            const BATCH_SIZE = 15; 
+            for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
+                const batch = eligibleWinners.slice(i, i + BATCH_SIZE);
+                const tx = new Transaction();
+                let hasInstructions = false;
 
-        const BATCH_SIZE = 15; 
-        for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
-            const batch = eligibleWinners.slice(i, i + BATCH_SIZE);
-            const tx = new Transaction();
-            let hasInstructions = false;
+                for (const winner of batch) {
+                    const shareRatio = winner.sharesHeld / totalWinningShares;
+                    const payoutLamports = Math.floor(potLamports * shareRatio);
 
-            for (const winner of batch) {
-                const shareRatio = winner.sharesHeld / totalWinningShares;
-                const payoutLamports = Math.floor(potLamports * shareRatio);
+                    if (payoutLamports > 5000) { 
+                        tx.add(SystemProgram.transfer({
+                            fromPubkey: houseKeypair.publicKey,
+                            toPubkey: new PublicKey(winner.pubKey),
+                            lamports: payoutLamports
+                        }));
+                        hasInstructions = true;
+                    }
+                }
 
-                if (payoutLamports > 5000) { 
-                    tx.add(SystemProgram.transfer({
-                        fromPubkey: houseKeypair.publicKey,
-                        toPubkey: new PublicKey(winner.pubKey),
-                        lamports: payoutLamports
-                    }));
-                    hasInstructions = true;
+                if (hasInstructions) {
+                    try {
+                        const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
+                        batch.forEach(async (w) => {
+                            const uData = await getUser(w.pubKey);
+                            if (uData.frameLog && uData.frameLog[frameId]) {
+                                const shareRatio = w.sharesHeld / totalWinningShares;
+                                uData.frameLog[frameId].payoutTx = sig;
+                                uData.frameLog[frameId].payoutAmount = (potLamports * shareRatio) / 1e9;
+                                await saveUser(w.pubKey, uData);
+                            }
+                        });
+                    } catch (e) { console.error(`> [PAYOUT] Batch Failed: ${e.message}`); }
                 }
             }
-
-            if (hasInstructions) {
-                try {
-                    const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
-                    batch.forEach(async (w) => {
-                        const uData = await getUser(w.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId]) {
-                            const shareRatio = w.sharesHeld / totalWinningShares;
-                            uData.frameLog[frameId].payoutTx = sig;
-                            uData.frameLog[frameId].payoutAmount = (potLamports * shareRatio) / 1e9;
-                            await saveUser(w.pubKey, uData);
-                        }
-                    });
-                } catch (e) { console.error(`> [PAYOUT] Batch Failed: ${e.message}`); }
-            }
+        } else {
+            console.log("> [PAYOUT] House Wins.");
         }
+
+        // 4. SWEEP EXCESS TO UPKEEP WALLET
+        // We do this LAST to ensure winners are paid first.
+        try {
+            // Fetch fresh balance after all payouts
+            const postPayoutBalance = await connection.getBalance(houseKeypair.publicKey);
+            const reserveLamports = SWEEP_TARGET * 1e9; // 0.05 SOL
+            const txFeeBuffer = 5000; // Approx fee for sweep
+            
+            // Calculate sweep amount (Balance - 0.05 - Fee)
+            const sweepLamports = postPayoutBalance - reserveLamports - txFeeBuffer;
+
+            if (sweepLamports > 0) {
+                const sweepTx = new Transaction().add(
+                    SystemProgram.transfer({
+                        fromPubkey: houseKeypair.publicKey,
+                        toPubkey: UPKEEP_WALLET,
+                        lamports: sweepLamports
+                    })
+                );
+                const sweepSig = await sendAndConfirmTransaction(connection, sweepTx, [houseKeypair]);
+                console.log(`> [SWEEP] Sent ${(sweepLamports/1e9).toFixed(4)} SOL to Upkeep. Left ~0.05 SOL.`);
+            } else {
+                console.log(`> [SWEEP] No excess funds (Bal: ${(postPayoutBalance/1e9).toFixed(4)}).`);
+            }
+        } catch (e) {
+            console.error(`> [SWEEP] Failed: ${e.message}`);
+        }
+
     } catch (e) { console.error("> [PAYOUT] System Error:", e); }
 }
 
@@ -313,7 +346,6 @@ async function closeFrame(closePrice, closeTime) {
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
-        gameState.sharePriceHistory = []; // Reset price history for new frame
         await saveSystemState();
 
         processPayouts(frameId, result, betsSnapshot, frameSol);
@@ -321,7 +353,7 @@ async function closeFrame(closePrice, closeTime) {
     } finally { release(); }
 }
 
-// --- ORACLE & SHARE PRICE SNAPSHOTS ---
+// --- ORACLE ---
 async function updatePrice() {
     try {
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
@@ -334,7 +366,6 @@ async function updatePrice() {
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
-                
                 if (currentWindowStart > gameState.candleStartTime) {
                     if (gameState.candleStartTime === 0) {
                         gameState.candleStartTime = currentWindowStart;
@@ -342,24 +373,6 @@ async function updatePrice() {
                         await saveSystemState();
                     }
                 }
-
-                // --- SHARE PRICE SNAPSHOT (EVERY 10s) ---
-                const totalS = gameState.poolShares.up + gameState.poolShares.down;
-                const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
-                const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
-                
-                gameState.sharePriceHistory.push({
-                    t: Date.now(),
-                    up: pUp,
-                    down: pDown
-                });
-
-                // Prune history > 5 mins
-                const FIVE_MINS = 5 * 60 * 1000;
-                gameState.sharePriceHistory = gameState.sharePriceHistory.filter(x => x.t > Date.now() - FIVE_MINS);
-                
-                // Save changes (throttled save would be better but this is safe)
-                await saveSystemState();
             });
             
             const currentWindowStart = getCurrentWindowStart();
@@ -373,13 +386,8 @@ async function updatePrice() {
 setInterval(updatePrice, 10000); 
 updatePrice(); 
 
-// --- HELPER: Calc Change ---
-function getPercentChange(current, old) {
-    if (!old || old === 0) return 0;
-    return ((current - old) / old) * 100;
-}
-
 // --- ENDPOINTS ---
+
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
@@ -394,18 +402,6 @@ app.get('/api/state', async (req, res) => {
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-
-        // --- HISTORICAL CHANGE CALCULATION ---
-        const nowTime = Date.now();
-        const oneMinAgo = gameState.sharePriceHistory.find(x => x.t >= nowTime - 60000);
-        const fiveMinAgo = gameState.sharePriceHistory.find(x => x.t >= nowTime - 300000);
-
-        const changes = {
-            up1m: oneMinAgo ? getPercentChange(priceUp, oneMinAgo.up) : 0,
-            up5m: fiveMinAgo ? getPercentChange(priceUp, fiveMinAgo.up) : 0,
-            down1m: oneMinAgo ? getPercentChange(priceDown, oneMinAgo.down) : 0,
-            down5m: fiveMinAgo ? getPercentChange(priceDown, fiveMinAgo.down) : 0,
-        };
 
         const userKey = req.query.user;
         let myStats = null;
@@ -433,8 +429,7 @@ app.get('/api/state', async (req, res) => {
             market: {
                 priceUp, priceDown,
                 sharesUp: gameState.poolShares.up,
-                sharesDown: gameState.poolShares.down,
-                changes: changes // Send calculated changes
+                sharesDown: gameState.poolShares.down
             },
             history: historySummary,
             recentTrades: gameState.recentTrades,
@@ -521,5 +516,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast High-Perf Engine v28 running on ${PORT}`);
+    console.log(`> ASDForecast Engine v30 (Sweep Enabled) running on ${PORT}`);
 });
