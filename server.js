@@ -2,8 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction } = require('@solana/web3.js');
 const axios = require('axios');
-const fs = require('fs').promises; // Async
-const fsSync = require('fs');      // Sync
+const fs = require('fs').promises; 
+const fsSync = require('fs');      
 const path = require('path');
 const { Mutex } = require('async-mutex');
 
@@ -20,13 +20,13 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
-const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq"); // NEW UPKEEP WALLET
-const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
+const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
-const RESERVE_SOL = 0.02; // Hard stop limit
-const SWEEP_TARGET = 0.05; // Target balance after sweep
+const RESERVE_SOL = 0.02;
+const SWEEP_TARGET = 0.05;
+const FRAME_DURATION = 15 * 60 * 1000; // 15 Minutes in ms
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -115,8 +115,11 @@ async function saveSystemState() {
 
         if (gameState.candleStartTime > 0) {
             const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
+            // EXPLICIT TIMESTAMPS IN SHARDED FILE
             await fs.writeFile(frameFile, JSON.stringify({
                 id: gameState.candleStartTime,
+                startTime: gameState.candleStartTime,
+                endTime: gameState.candleStartTime + FRAME_DURATION,
                 open: gameState.candleOpen,
                 poolShares: gameState.poolShares,
                 bets: [...gameState.bets]
@@ -162,7 +165,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         const balance = await connection.getBalance(houseKeypair.publicKey);
         if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
-        // 1. HANDLE FLAT MARKET
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
@@ -178,7 +180,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             return;
         }
 
-        // 2. HANDLE FEES
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
@@ -191,7 +192,6 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             } catch (e) {}
         }
 
-        // 3. DISTRIBUTE WINNINGS
         const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
         const userPositions = {};
         bets.forEach(bet => {
@@ -251,19 +251,13 @@ async function processPayouts(frameId, result, bets, totalVolume) {
                     } catch (e) { console.error(`> [PAYOUT] Batch Failed: ${e.message}`); }
                 }
             }
-        } else {
-            console.log("> [PAYOUT] House Wins.");
         }
 
-        // 4. SWEEP EXCESS TO UPKEEP WALLET
-        // We do this LAST to ensure winners are paid first.
+        // SWEEP EXCESS
         try {
-            // Fetch fresh balance after all payouts
             const postPayoutBalance = await connection.getBalance(houseKeypair.publicKey);
-            const reserveLamports = SWEEP_TARGET * 1e9; // 0.05 SOL
-            const txFeeBuffer = 5000; // Approx fee for sweep
-            
-            // Calculate sweep amount (Balance - 0.05 - Fee)
+            const reserveLamports = SWEEP_TARGET * 1e9; 
+            const txFeeBuffer = 5000;
             const sweepLamports = postPayoutBalance - reserveLamports - txFeeBuffer;
 
             if (sweepLamports > 0) {
@@ -274,14 +268,9 @@ async function processPayouts(frameId, result, bets, totalVolume) {
                         lamports: sweepLamports
                     })
                 );
-                const sweepSig = await sendAndConfirmTransaction(connection, sweepTx, [houseKeypair]);
-                console.log(`> [SWEEP] Sent ${(sweepLamports/1e9).toFixed(4)} SOL to Upkeep. Left ~0.05 SOL.`);
-            } else {
-                console.log(`> [SWEEP] No excess funds (Bal: ${(postPayoutBalance/1e9).toFixed(4)}).`);
+                await sendAndConfirmTransaction(connection, sweepTx, [houseKeypair]);
             }
-        } catch (e) {
-            console.error(`> [SWEEP] Failed: ${e.message}`);
-        }
+        } catch (e) {}
 
     } catch (e) { console.error("> [PAYOUT] System Error:", e); }
 }
@@ -302,10 +291,18 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
+        // EXPLICIT TIMESTAMPS IN HISTORY
         const frameRecord = {
-            id: frameId, time: new Date(frameId).toISOString(),
-            open: openPrice, close: closePrice, result: result,
-            sharesUp: realSharesUp, sharesDown: realSharesDown, totalSol: frameSol
+            id: frameId,
+            startTime: frameId, // Store start
+            endTime: frameId + FRAME_DURATION, // Store end
+            time: new Date(frameId).toISOString(),
+            open: openPrice, 
+            close: closePrice, 
+            result: result,
+            sharesUp: realSharesUp, 
+            sharesDown: realSharesDown, 
+            totalSol: frameSol
         };
         historySummary.unshift(frameRecord); 
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
@@ -356,12 +353,10 @@ async function closeFrame(closePrice, closeTime) {
 // --- ORACLE ---
 async function updatePrice() {
     try {
-        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-            params: { ids: 'solana', vs_currencies: 'usd', x_cg_demo_api_key: COINGECKO_API_KEY }
-        });
+        const response = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
         
-        if (response.data.solana) {
-            const currentPrice = response.data.solana.usd;
+        if (response.data && response.data.price) {
+            const currentPrice = parseFloat(response.data.price);
             
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
@@ -391,8 +386,9 @@ updatePrice();
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
+        // Note: We still calc time left on the fly for the timer countdown
         const now = new Date();
-        const nextWindowStart = getCurrentWindowStart() + (15 * 60 * 1000);
+        const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
         const msUntilClose = nextWindowStart - now.getTime();
 
         const priceChange = gameState.price - gameState.candleOpen;
@@ -422,6 +418,9 @@ app.get('/api/state', async (req, res) => {
         res.json({
             price: gameState.price,
             openPrice: gameState.candleOpen,
+            candleStartTime: gameState.candleStartTime,
+            // SEND CALCULATED END TIME
+            candleEndTime: gameState.candleStartTime + FRAME_DURATION,
             change: percentChange,
             msUntilClose: msUntilClose,
             currentVolume: currentVolume,
@@ -516,5 +515,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v30 (Sweep Enabled) running on ${PORT}`);
+    console.log(`> ASDForecast Engine v32 running on ${PORT}`);
 });
