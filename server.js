@@ -29,7 +29,7 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "76.2"; // Updated to v76.2
+const BACKEND_VERSION = "77.0"; // Updated to v77
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -221,7 +221,7 @@ async function processPayoutQueue() {
                         const uData = await getUser(item.pubKey);
                         if (uData.frameLog && uData.frameLog[frameId]) {
                             const entry = uData.frameLog[frameId];
-                            // IDEMPOTENCY: Skip if already paid/refunded
+                            // IDEMPOTENCY CHECK
                             if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
                             if (type === 'USER_REFUND' && entry.refundTx) continue;
                         }
@@ -296,19 +296,20 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
             else userPositions[bet.user].down += bet.shares;
         });
 
-        // --- WINNER CALCULATION LOGIC ---
         let totalWinningShares = 0;
         const eligibleWinners = [];
 
         for (const [pubKey, pos] of Object.entries(userPositions)) {
-            // DETERMINE USER DIRECTION (FLAT if equal)
+            // --- STRICT DIRECTION CHECK ---
             let userDir = "FLAT";
             if (pos.up > pos.down) userDir = "UP";
             else if (pos.down > pos.up) userDir = "DOWN";
+            
+            // Explicit 3rd Check: Hedge Paradox
+            if (pos.up === pos.down) userDir = "FLAT"; 
 
-            // STRICT FILTERING: Only if userDir matches result do they count.
-            // This correctly excludes 50/50 hedges (since userDir is FLAT).
-            if (userDir === result) { 
+            // Only pay if user matched result
+            if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
                 totalWinningShares += sharesHeld;
                 eligibleWinners.push({ pubKey, sharesHeld });
@@ -391,6 +392,9 @@ async function closeFrame(closePrice, closeTime) {
             });
             for (const [pk, pos] of Object.entries(userPositions)) {
                 let dir = pos.up > pos.down ? 'UP' : (pos.down > pos.up ? 'DOWN' : 'FLAT');
+                // Strict check here too
+                if (pos.up === pos.down) dir = 'FLAT';
+                
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) payoutTotal = potSol;
@@ -427,10 +431,10 @@ async function closeFrame(closePrice, closeTime) {
                 let userDir = "FLAT";
                 if (pos.up > pos.down) userDir = "UP";
                 else if (pos.down > pos.up) userDir = "DOWN";
-                
-                // If pos.up === pos.down, userDir stays "FLAT" -> outcome is LOSS.
+                // Explicit check for user record
+                if (pos.up === pos.down) userDir = "FLAT";
+
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
-                
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
                 userData.frameLog[frameId] = { 
