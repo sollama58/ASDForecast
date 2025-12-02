@@ -4,9 +4,9 @@ const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfi
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { Mutex } = require('async-mutex');
 
 const app = express();
-const { Mutex } = require('async-mutex');
 const stateMutex = new Mutex();
 
 app.use(cors({
@@ -37,7 +37,7 @@ if (!fs.existsSync(USERS_DIR)) fs.mkdirSync(USERS_DIR);
 
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
-const STATS_FILE = path.join(DATA_DIR, 'global_stats.json'); // NEW FILE
+const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
 
 console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
@@ -61,26 +61,24 @@ let gameState = {
     candleOpen: 0,
     candleStartTime: 0,
     poolShares: { up: 100, down: 100 },
-    bets: [] 
+    bets: [],
+    recentTrades: [] // NEW: Rolling log of last 20 trades for ticker
 };
 let historySummary = [];
-// NEW GLOBAL STATS OBJECT
-let globalStats = {
-    totalVolume: 0,
-    totalFees: 0
-};
+let globalStats = { totalVolume: 0, totalFees: 0 };
 
 // --- I/O ---
 function loadGlobalState() {
     try {
         if (fs.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fs.readFileSync(HISTORY_FILE));
-        if (fs.existsSync(STATS_FILE)) globalStats = JSON.parse(fs.readFileSync(STATS_FILE)); // Load Stats
+        if (fs.existsSync(STATS_FILE)) globalStats = JSON.parse(fs.readFileSync(STATS_FILE));
         
         if (fs.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fs.readFileSync(STATE_FILE));
             gameState.candleOpen = savedState.candleOpen || 0;
             gameState.candleStartTime = savedState.candleStartTime || 0;
             gameState.poolShares = savedState.poolShares || { up: 100, down: 100 };
+            gameState.recentTrades = savedState.recentTrades || [];
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             if (fs.existsSync(currentFrameFile)) {
@@ -99,10 +97,10 @@ function saveSystemState() {
         fs.writeFileSync(STATE_FILE, JSON.stringify({
             candleOpen: gameState.candleOpen,
             candleStartTime: gameState.candleStartTime,
-            poolShares: gameState.poolShares
+            poolShares: gameState.poolShares,
+            recentTrades: gameState.recentTrades
         }));
         
-        // Save Global Stats
         fs.writeFileSync(STATS_FILE, JSON.stringify(globalStats));
 
         if (gameState.candleStartTime > 0) {
@@ -149,18 +147,15 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         const balance = await connection.getBalance(houseKeypair.publicKey);
         if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
 
-        // --- FLAT MARKET (99% Burn) ---
+        // --- FLAT MARKET ---
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
             if (burnLamports > 0) {
                 try {
                     const burnTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: burnLamports }));
                     await sendAndConfirmTransaction(connection, burnTx, [houseKeypair]);
-                    
-                    // Update Global Stats
                     globalStats.totalFees += (burnLamports / 1e9);
                     saveSystemState();
-                    
                     console.log(`> [BURN] Sent ${burnLamports/1e9} SOL to Fee Wallet.`);
                 } catch (e) { console.error("> [BURN] Error:", e.message); }
             }
@@ -168,24 +163,18 @@ async function processPayouts(frameId, result, bets, totalVolume) {
         }
 
         // --- NORMAL MARKET ---
-        // 1. Fee (5.52%)
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
                 const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
                 await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
-                
-                // Update Global Stats
                 globalStats.totalFees += (feeLamports / 1e9);
                 saveSystemState();
-
             } catch (e) { console.error("> [FEE] Error:", e.message); }
         }
 
-        // 2. User Payouts
         const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
         const userPositions = {};
-        
         bets.forEach(bet => {
             if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
             if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
@@ -257,8 +246,8 @@ async function closeFrame(closePrice, closeTime) {
         if (closePrice > openPrice) result = "UP";
         else if (closePrice < openPrice) result = "DOWN";
 
-        const realSharesUp = Math.max(0, gameState.poolShares.up - 100);
-        const realSharesDown = Math.max(0, gameState.poolShares.down - 100);
+        const realSharesUp = Math.max(0, gameState.poolShares.up - 50);
+        const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
         const frameRecord = {
@@ -298,7 +287,7 @@ async function closeFrame(closePrice, closeTime) {
 
         gameState.candleStartTime = closeTime;
         gameState.candleOpen = closePrice;
-        gameState.poolShares = { up: 100, down: 100 }; 
+        gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
 
         await saveSystemState();
@@ -377,14 +366,14 @@ app.get('/api/state', async (req, res) => {
             change: percentChange,
             msUntilClose: msUntilClose,
             currentVolume: currentVolume,
-            // SEND GLOBAL STATS
-            platformStats: globalStats, 
+            platformStats: globalStats,
             market: {
                 priceUp, priceDown,
                 sharesUp: gameState.poolShares.up,
                 sharesDown: gameState.poolShares.down
             },
             history: historySummary,
+            recentTrades: gameState.recentTrades, // Send Ticker Data
             userStats: myStats,
             activePosition: activePosition 
         });
@@ -437,10 +426,18 @@ app.post('/api/verify-bet', async (req, res) => {
             timestamp: Date.now()
         });
 
-        // UPDATE GLOBAL VOLUME
-        globalStats.totalVolume += solAmount;
+        // Add to Ticker
+        gameState.recentTrades.unshift({
+            user: userPubKey,
+            direction: direction,
+            shares: sharesReceived,
+            time: Date.now()
+        });
+        if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
 
+        globalStats.totalVolume += solAmount;
         await saveSystemState();
+        
         res.json({ success: true, shares: sharesReceived, price: price });
 
     } catch (e) {
@@ -450,5 +447,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Scalable Engine running on ${PORT}`);
+    console.log(`> ASDForecast Secure Engine v25 (Ticker Enabled) running on ${PORT}`);
 });
