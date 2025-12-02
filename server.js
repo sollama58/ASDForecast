@@ -39,7 +39,7 @@ if (!fsSync.existsSync(USERS_DIR)) fsSync.mkdirSync(USERS_DIR);
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
-const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); // CHANGED: .log extension implies text stream
+const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); 
 
 console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
@@ -50,7 +50,7 @@ try {
         houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
         console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
     } else {
-        console.warn("> [WARN] NO PRIVATE KEY ENV VAR FOUND. PAYOUTS DISABLED.");
+        console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
     }
 } catch (e) { console.error("> [ERR] Wallet Load Failed:", e.message); }
 
@@ -59,7 +59,7 @@ let gameState = {
     price: 0,
     candleOpen: 0,
     candleStartTime: 0,
-    poolShares: { up: 100, down: 100 },
+    poolShares: { up: 50, down: 50 },
     bets: [],
     recentTrades: []
 };
@@ -67,27 +67,25 @@ let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0 };
 let processedSignatures = new Set(); 
 
-// --- I/O (OPTIMIZED) ---
+// --- I/O ---
 function loadGlobalState() {
     try {
         if (fsSync.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fsSync.readFileSync(HISTORY_FILE));
         if (fsSync.existsSync(STATS_FILE)) globalStats = JSON.parse(fsSync.readFileSync(STATS_FILE));
         
-        // [SCALABILITY FIX] Read Signatures Line-by-Line
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
             const lines = fileContent.split('\n');
             lines.forEach(line => {
                 if(line.trim()) processedSignatures.add(line.trim());
             });
-            console.log(`> [SEC] Loaded ${processedSignatures.size} signatures from Append-Log.`);
         }
 
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState.candleOpen = savedState.candleOpen || 0;
             gameState.candleStartTime = savedState.candleStartTime || 0;
-            gameState.poolShares = savedState.poolShares || { up: 100, down: 100 };
+            gameState.poolShares = savedState.poolShares || { up: 50, down: 50 };
             gameState.recentTrades = savedState.recentTrades || [];
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
@@ -153,11 +151,11 @@ function getCurrentWindowStart() {
 async function processPayouts(frameId, result, bets, totalVolume) {
     if (!houseKeypair || totalVolume === 0) return;
     const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-    console.log(`> [PAYOUT] Frame ${frameId} | Result: ${result} | Vol: ${totalVolume.toFixed(4)} SOL`);
+    console.log(`> [PAYOUT] Frame ${frameId} | Vol: ${totalVolume.toFixed(4)} SOL`);
 
     try {
         const balance = await connection.getBalance(houseKeypair.publicKey);
-        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
+        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low.");
 
         if (result === "FLAT") {
             const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
@@ -169,8 +167,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
                         globalStats.totalFees += (burnLamports / 1e9);
                         await saveSystemState();
                     });
-                    console.log(`> [BURN] 99% Burn Executed.`);
-                } catch (e) { console.error("> [BURN] Error:", e.message); }
+                } catch (e) {}
             }
             return;
         }
@@ -184,7 +181,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
                     globalStats.totalFees += (feeLamports / 1e9);
                     await saveSystemState();
                 });
-            } catch (e) { console.error("> [FEE] Error:", e.message); }
+            } catch (e) {}
         }
 
         const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
@@ -210,7 +207,7 @@ async function processPayouts(frameId, result, bets, totalVolume) {
             }
         }
 
-        if (totalWinningShares === 0) return console.log("> [PAYOUT] House Wins.");
+        if (totalWinningShares === 0) return;
 
         const BATCH_SIZE = 15; 
         for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
@@ -274,15 +271,15 @@ async function closeFrame(closePrice, closeTime) {
         historySummary.unshift(frameRecord); 
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
 
-        // Snapshot Bets
         const betsSnapshot = [...gameState.bets];
 
         // Update Users (Batch)
         const userPositions = {};
         betsSnapshot.forEach(bet => {
-            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
+            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
             if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
             else userPositions[bet.user].down += bet.shares;
+            userPositions[bet.user].sol += bet.costSol; // Track SOL per frame per user
         });
 
         const usersToUpdate = Object.entries(userPositions);
@@ -292,13 +289,26 @@ async function closeFrame(closePrice, closeTime) {
             await Promise.all(batch.map(async ([pubKey, pos]) => {
                 const userData = await getUser(pubKey);
                 userData.framesPlayed += 1;
+                
                 let userDir = "FLAT";
                 if (pos.up > pos.down) userDir = "UP";
                 else if (pos.down > pos.up) userDir = "DOWN";
+
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
+                
                 if (!userData.frameLog) userData.frameLog = {};
-                userData.frameLog[frameId] = { dir: userDir, result: outcome, time: Date.now() };
+                
+                // UPDATED: SAVE DETAILED STATS FOR THIS FRAME
+                const myShares = userDir === 'UP' ? pos.up : (userDir === 'DOWN' ? pos.down : 0);
+                userData.frameLog[frameId] = { 
+                    dir: userDir, 
+                    result: outcome, 
+                    time: Date.now(),
+                    shares: myShares,   // Log Shares
+                    wagered: pos.sol    // Log SOL Cost
+                };
+                
                 await saveUser(pubKey, userData);
             }));
         }
@@ -309,7 +319,6 @@ async function closeFrame(closePrice, closeTime) {
         gameState.bets = []; 
         await saveSystemState();
 
-        // Payouts (Background)
         processPayouts(frameId, result, betsSnapshot, frameSol);
         
     } finally { release(); }
@@ -384,6 +393,7 @@ app.get('/api/state', async (req, res) => {
         res.json({
             price: gameState.price,
             openPrice: gameState.candleOpen,
+            candleStartTime: gameState.candleStartTime, // Send start time
             change: percentChange,
             msUntilClose: msUntilClose,
             currentVolume: currentVolume,
@@ -405,10 +415,7 @@ app.post('/api/verify-bet', async (req, res) => {
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
 
-    // [SCALABILITY FIX] CHECK SIGNATURE BEFORE NETWORK CALL
-    if (processedSignatures.has(signature)) {
-        return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
-    }
+    if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX" });
 
     let solAmount = 0;
     let txBlockTime = 0;
@@ -418,7 +425,6 @@ app.post('/api/verify-bet', async (req, res) => {
         if (!tx || tx.meta.err) return res.status(400).json({ error: "TX_INVALID" });
         
         txBlockTime = tx.blockTime * 1000;
-
         let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
         const instructions = tx.transaction.message.instructions;
         for (let ix of instructions) {
@@ -434,13 +440,8 @@ app.post('/api/verify-bet', async (req, res) => {
 
     const release = await stateMutex.acquire();
     try {
-        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
-        
-        // [SCALABILITY FIX] Strict Timestamp Check
-        if (txBlockTime < gameState.candleStartTime) {
-            console.warn(`> [SEC] Rejected Stale Bet: ${signature}`);
-            return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
-        }
+        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX" });
+        if (txBlockTime < gameState.candleStartTime) return res.status(400).json({ error: "TX_EXPIRED" });
 
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         let price = 0.05; 
@@ -453,7 +454,6 @@ app.post('/api/verify-bet', async (req, res) => {
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
-        // Async User Update
         getUser(userPubKey).then(userData => {
             userData.totalSol += solAmount;
             saveUser(userPubKey, userData);
@@ -469,8 +469,6 @@ app.post('/api/verify-bet', async (req, res) => {
         if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
 
         globalStats.totalVolume += solAmount;
-        
-        // [SCALABILITY FIX] Append-Only Logging
         processedSignatures.add(signature);
         await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
 
@@ -485,5 +483,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast High-Perf Engine v27 running on ${PORT}`);
+    console.log(`> ASDForecast Engine v27 running on ${PORT}`);
 });
