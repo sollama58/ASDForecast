@@ -20,105 +20,77 @@ const HOUSE_ADDRESS = "H3tY5a5n7C5h2jK8n3m4n5b6v7c8x9z1a2s3d4f5g6h";
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const STORAGE_FILE = path.join(__dirname, 'storage.json');
 
-// --- PERSISTENCE LAYER ---
+// --- PERSISTENCE ---
 let gameState = {
     price: 0,
     candleOpen: 0,
     candleStartTime: 0,
-    bets: [] 
+    bets: [],
+    // Track Pool Volume in SOL for pricing
+    poolVolume: { up: 0.1, down: 0.1 } // Start with dust to avoid div/0
 };
 
 function loadState() {
     try {
         if (fs.existsSync(STORAGE_FILE)) {
-            const raw = fs.readFileSync(STORAGE_FILE);
-            const data = JSON.parse(raw);
+            const data = JSON.parse(fs.readFileSync(STORAGE_FILE));
             gameState.bets = data.bets || [];
             gameState.candleOpen = data.candleOpen || 0;
             gameState.candleStartTime = data.candleStartTime || 0;
-            console.log(`> [SYS] State loaded. ${gameState.bets.length} active bets.`);
+            gameState.poolVolume = data.poolVolume || { up: 0.1, down: 0.1 };
+            console.log(`> [SYS] State loaded.`);
         }
-    } catch (e) {
-        console.error("> [ERR] Failed to load state", e);
-    }
+    } catch (e) { console.error("Load Error", e); }
 }
 
 function saveState() {
     try {
-        // Only save what we need to persist
-        const dataToSave = {
-            bets: gameState.bets,
-            candleOpen: gameState.candleOpen,
-            candleStartTime: gameState.candleStartTime
-        };
-        fs.writeFileSync(STORAGE_FILE, JSON.stringify(dataToSave));
-    } catch (e) {
-        console.error("> [ERR] Failed to save state", e);
-    }
+        fs.writeFileSync(STORAGE_FILE, JSON.stringify(gameState));
+    } catch (e) { console.error("Save Error", e); }
 }
 
-// Load on startup
 loadState();
 
-// --- TIME & CANDLE LOGIC ---
+// --- 15m LOGIC ---
 function getCurrentWindowStart() {
     const now = new Date();
-    const minutes = now.getMinutes();
-    const windowStartMinutes = Math.floor(minutes / 15) * 15;
-    
-    const windowStart = new Date(now);
-    windowStart.setMinutes(windowStartMinutes);
-    windowStart.setSeconds(0);
-    windowStart.setMilliseconds(0);
-    
-    return windowStart.getTime();
+    const minutes = Math.floor(now.getMinutes() / 15) * 15;
+    const start = new Date(now);
+    start.setMinutes(minutes, 0, 0);
+    return start.getTime();
 }
 
 // --- ORACLE ---
 async function updatePrice() {
     try {
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-            params: {
-                ids: 'solana',
-                vs_currencies: 'usd',
-                x_cg_demo_api_key: COINGECKO_API_KEY 
-            }
+            params: { ids: 'solana', vs_currencies: 'usd', x_cg_demo_api_key: COINGECKO_API_KEY }
         });
         
         if (response.data.solana) {
             const currentPrice = response.data.solana.usd;
             gameState.price = currentPrice;
             
-            // Check 15m Window Logic
             const currentWindowStart = getCurrentWindowStart();
             
-            // If we moved into a new 15m window (or first run)
+            // NEW CANDLE DETECTED
             if (currentWindowStart > gameState.candleStartTime) {
-                console.log(`> [SYS] New 15m Candle Started: ${new Date(currentWindowStart).toISOString()}`);
-                
-                // Reset/Archive old bets could happen here, but for now we keep them
-                // You might want to filter out old bets in a real app
-                
-                // Set new Candle Open
+                console.log(`> [SYS] New 15m Candle: ${new Date(currentWindowStart).toISOString()}`);
                 gameState.candleStartTime = currentWindowStart;
                 gameState.candleOpen = currentPrice;
-                
-                // Clear bets from previous round? 
-                // For this demo, we'll keep them but usually you'd archive them here.
-                // gameState.bets = []; 
-                
+                // Reset Pools for new round? 
+                // For this demo, we keep cumulative pools to show pricing dynamics, 
+                // or you can reset: gameState.poolVolume = { up: 0.1, down: 0.1 };
+                // Let's reset to keep it fresh for the timeframe.
+                gameState.poolVolume = { up: 0.1, down: 0.1 }; 
+                gameState.bets = []; // Clear old bets
                 saveState();
             } else if (gameState.candleOpen === 0) {
-                // First run initialization
                 gameState.candleOpen = currentPrice;
                 gameState.candleStartTime = currentWindowStart;
             }
-
-            console.log(`> ORACLE: $${currentPrice} | Open: $${gameState.candleOpen}`);
         }
-    } catch (e) {
-        console.log("> [ERR] Oracle Connection Unstable");
-    }
+    } catch (e) { console.log("Oracle unstable"); }
 }
 
 setInterval(updatePrice, 30000); 
@@ -132,84 +104,96 @@ app.get('/api/state', (req, res) => {
     const nextWindowStart = currentWindowStart + (15 * 60 * 1000);
     const msUntilClose = nextWindowStart - now.getTime();
 
-    // Calculate Change relative to 15m Open
     const priceChange = gameState.price - gameState.candleOpen;
-    const percentChange = (priceChange / gameState.candleOpen) * 100;
+    const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
 
-    // Filter bets for THIS window only (Optional, based on requirement)
-    // We'll return all bets for volume calculation to keep it simple, 
-    // or filter by timestamp >= candleStartTime if you only want fresh bets.
-    // Let's filter for current candle bets to match the theme "15min timeframe"
-    const activeBets = gameState.bets.filter(b => b.timestamp >= gameState.candleStartTime);
-
-    const upBets = activeBets.filter(b => b.direction === 'UP');
-    const downBets = activeBets.filter(b => b.direction === 'DOWN');
-
-    const upSol = upBets.reduce((acc, curr) => acc + (curr.amount / 1000000000), 0);
-    const downSol = downBets.reduce((acc, curr) => acc + (curr.amount / 1000000000), 0);
-
-    const upUsd = upSol * gameState.price;
-    const downUsd = downSol * gameState.price;
+    // CALCULATE DYNAMIC PRICES
+    // Price = Share of Pool. e.g. 90 SOL UP / 100 SOL Total = 0.90 Price
+    const totalVol = gameState.poolVolume.up + gameState.poolVolume.down;
+    const priceUp = gameState.poolVolume.up / totalVol;
+    const priceDown = gameState.poolVolume.down / totalVol;
 
     res.json({
         price: gameState.price,
         openPrice: gameState.candleOpen,
-        change: percentChange, // This is now 15m change
+        change: percentChange,
         msUntilClose: msUntilClose,
-        totalBets: activeBets.length,
-        poolStats: { upSol, downSol, upUsd, downUsd }
+        market: {
+            priceUp: priceUp,
+            priceDown: priceDown,
+            volUp: gameState.poolVolume.up,
+            volDown: gameState.poolVolume.down
+        }
     });
 });
 
 app.post('/api/verify-bet', async (req, res) => {
-    const { signature, direction, userPubKey } = req.body;
+    const { signature, direction, userPubKey } = req.body; // Removed 'amount' from body, we trust chain
 
-    if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_PAYLOAD" });
+    if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
 
     try {
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-        const tx = await connection.getParsedTransaction(signature, { 
-            commitment: 'confirmed',
-            maxSupportedTransactionVersion: 0 
-        });
+        const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
 
         if (!tx) return res.status(404).json({ error: "TX_NOT_FOUND" });
         if (tx.meta.err) return res.status(400).json({ error: "TX_FAILED" });
 
-        // FIND AMOUNT
-        let amountLamports = 0;
+        // Extract SOL Amount
+        let lamports = 0;
         const instructions = tx.transaction.message.instructions;
         for (let ix of instructions) {
             if (ix.program === 'system' && ix.parsed.type === 'transfer') {
-                const info = ix.parsed.info;
-                if (info.destination === HOUSE_ADDRESS) {
-                    amountLamports = info.lamports;
+                if (ix.parsed.info.destination === HOUSE_ADDRESS) {
+                    lamports = ix.parsed.info.lamports;
                     break;
                 }
             }
         }
 
-        if (amountLamports === 0) return res.status(400).json({ error: "NO_SOL_TRANSFER" });
+        if (lamports === 0) return res.status(400).json({ error: "NO_FUNDS_DETECTED" });
+
+        const solAmount = lamports / 1000000000;
+
+        // CALCULATE SHARES PURCHASED
+        // Based on price AT EXECUTION time
+        const totalVol = gameState.poolVolume.up + gameState.poolVolume.down;
+        let price = 0.5; // default
+        
+        if (direction === 'UP') {
+            price = gameState.poolVolume.up / totalVol;
+            gameState.poolVolume.up += solAmount;
+        } else {
+            price = gameState.poolVolume.down / totalVol;
+            gameState.poolVolume.down += solAmount;
+        }
+
+        // Avoid price=0 edge case
+        if(price < 0.01) price = 0.01;
+
+        const shares = solAmount / price;
 
         gameState.bets.push({
             signature,
             user: userPubKey,
             direction,
-            amount: amountLamports,
+            costSol: solAmount,
+            entryPrice: price,
+            shares: shares,
             timestamp: Date.now()
         });
 
-        saveState(); // Persist immediately
+        saveState();
         
-        console.log(`> [SYS] BET: ${userPubKey} | ${direction} | ${(amountLamports/1e9).toFixed(2)}`);
-        res.json({ success: true, message: "BET_LOGGED" });
+        console.log(`> TRADE: ${userPubKey} bought ${shares.toFixed(2)} ${direction} shares for ${solAmount} SOL`);
+        res.json({ success: true, shares: shares, price: price });
 
     } catch (e) {
-        console.error("> [ERR] Verify Fail", e);
+        console.error(e);
         res.status(500).json({ error: "SERVER_ERROR" });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`> [BOOT] ASDForecast Persistence Server on ${PORT}`);
+    console.log(`> ASDForecast Market Engine running on ${PORT}`);
 });
