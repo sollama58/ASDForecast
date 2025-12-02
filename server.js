@@ -26,7 +26,7 @@ const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVX
 
 // --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
-const HELIUS_MAINNET_URL = SOLANA_NETWORK; // Reusing the authenticated endpoint
+const HELIUS_MAINNET_URL = SOLANA_NETWORK;
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
@@ -34,7 +34,7 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "100.0"; // Mainnet Prep + Pause History
+const BACKEND_VERSION = "100.3"; // Helius Integration
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -309,13 +309,14 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         const eligibleWinners = [];
 
         for (const [pubKey, pos] of Object.entries(userPositions)) {
+            // --- ROUNDING FIX ---
             const rUp = Math.round(pos.up * 10000) / 10000;
             const rDown = Math.round(pos.down * 10000) / 10000;
             
             let userDir = "FLAT";
             if (rUp > rDown) userDir = "UP";
             else if (rDown > rUp) userDir = "DOWN";
-            if (pos.up === pos.down) userDir = "FLAT"; 
+            if (rUp === rDown) userDir = "FLAT"; 
 
             if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
@@ -405,6 +406,7 @@ async function closeFrame(closePrice, closeTime) {
                 if (rUp > rDown) dir = "UP";
                 else if (rDown > rUp) dir = "DOWN";
                 if (rUp === rDown) dir = "FLAT";
+                
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) payoutTotal = potSol;
@@ -430,6 +432,7 @@ async function closeFrame(closePrice, closeTime) {
             userPositions[bet.user].sol += bet.costSol;
         });
 
+        // LOG WINNERS & UPDATE USERS
         const usersToUpdate = Object.entries(userPositions);
         const USER_IO_BATCH_SIZE = 20; 
         for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
@@ -444,7 +447,6 @@ async function closeFrame(closePrice, closeTime) {
                 let userDir = "FLAT";
                 if (rUp > rDown) userDir = "UP";
                 else if (rDown > rUp) userDir = "DOWN";
-                // Explicit check
                 if (rUp === rDown) userDir = "FLAT";
 
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
@@ -491,8 +493,7 @@ async function updatePrice() {
                 if (gameState.isPaused) {
                     if (currentWindowStart > gameState.candleStartTime) {
                         console.log("> [SYS] Unpausing for new Frame.");
-                        
-                        // --- RECORD PAUSED FRAME IN HISTORY ---
+                        // --- PAUSE HISTORY RECORDING ---
                         const skippedFrameRecord = {
                             id: gameState.candleStartTime,
                             startTime: gameState.candleStartTime,
@@ -500,13 +501,13 @@ async function updatePrice() {
                             time: new Date(gameState.candleStartTime).toISOString(),
                             open: gameState.candleOpen,
                             close: currentPrice,
-                            result: "PAUSED", // Distinct Status
+                            result: "PAUSED", 
                             sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
                         };
                         historySummary.unshift(skippedFrameRecord);
                         if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
                         await atomicWrite(HISTORY_FILE, historySummary);
-                        // ----------------------------------------
+                        // ------------------------------
 
                         gameState.isPaused = false; 
                         gameState.candleStartTime = currentWindowStart;
@@ -550,7 +551,6 @@ setInterval(updatePrice, 10000);
 updatePrice(); 
 processPayoutQueue();
 
-// --- ENDPOINTS ---
 app.get('/api/state', async (req, res) => {
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
