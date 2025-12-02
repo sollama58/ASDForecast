@@ -21,7 +21,12 @@ const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA"; // UPDATED KEY
+
+// --- ASDF TRACKING CONFIG ---
+const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
+const HELIUS_MAINNET_URL = "https://mainnet.helius-rpc.com/?api-key=f171f1e4-6e9a-4295-b4d6-a7b43a968c6a";
+
+const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
@@ -52,6 +57,9 @@ try {
     if (process.env.SOLANA_WALLET_JSON) {
         houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
         console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
+    } else if (fsSync.existsSync('house-wallet.json')) {
+        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
+        console.log(`> [AUTH] Wallet Loaded (File): ${houseKeypair.publicKey.toString()}`);
     } else {
         console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
     }
@@ -67,14 +75,22 @@ let gameState = {
     recentTrades: []
 };
 let historySummary = [];
-let globalStats = { totalVolume: 0, totalFees: 0 };
+let globalStats = { 
+    totalVolume: 0, 
+    totalFees: 0, 
+    totalASDF: 0,           
+    lastASDFSignature: null // Cursor for transaction history
+};
 let processedSignatures = new Set(); 
 
 // --- I/O ---
 function loadGlobalState() {
     try {
         if (fsSync.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fsSync.readFileSync(HISTORY_FILE));
-        if (fsSync.existsSync(STATS_FILE)) globalStats = JSON.parse(fsSync.readFileSync(STATS_FILE));
+        if (fsSync.existsSync(STATS_FILE)) {
+            const loaded = JSON.parse(fsSync.readFileSync(STATS_FILE));
+            globalStats = { ...globalStats, ...loaded };
+        }
         
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
@@ -142,6 +158,70 @@ async function saveUser(pubKey, data) {
 }
 
 loadGlobalState();
+
+// --- ASDF TRANSACTION HISTORY PARSER (MAINNET) ---
+async function updateASDFPurchases() {
+    console.log("> [ASDF] Checking Mainnet History for purchases...");
+    const connection = new Connection(HELIUS_MAINNET_URL); // Mainnet Connection
+
+    try {
+        // 1. Fetch Signatures (Newest first)
+        const options = { limit: 20 }; // Check last 20 txs to be safe
+        if (globalStats.lastASDFSignature) {
+            options.until = globalStats.lastASDFSignature;
+        }
+
+        const signaturesDetails = await connection.getSignaturesForAddress(FEE_WALLET, options);
+        
+        if (signaturesDetails.length === 0) {
+            console.log("> [ASDF] No new transactions found.");
+            return;
+        }
+
+        // Update cursor immediately to newest
+        globalStats.lastASDFSignature = signaturesDetails[0].signature;
+
+        // 2. Fetch Parsed Transactions
+        const txs = await connection.getParsedTransactions(
+            signaturesDetails.map(s => s.signature),
+            { maxSupportedTransactionVersion: 0 }
+        );
+
+        let newPurchasedAmount = 0;
+
+        // 3. Analyze Token Balance Changes
+        for (const tx of txs) {
+            if (!tx || !tx.meta) continue;
+
+            // Find pre/post balances for ASDF Mint on Fee Wallet
+            const preBal = tx.meta.preTokenBalances.find(
+                b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString()
+            );
+            const postBal = tx.meta.postTokenBalances.find(
+                b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString()
+            );
+
+            const preAmount = preBal && preBal.uiTokenAmount.uiAmount ? preBal.uiTokenAmount.uiAmount : 0;
+            const postAmount = postBal && postBal.uiTokenAmount.uiAmount ? postBal.uiTokenAmount.uiAmount : 0;
+
+            // If Balance INCREASED, it's a purchase (or transfer in)
+            if (postAmount > preAmount) {
+                const diff = postAmount - preAmount;
+                newPurchasedAmount += diff;
+                console.log(`> [ASDF] Found Purchase: +${diff} (TX: ${tx.transaction.signatures[0]})`);
+            }
+        }
+
+        if (newPurchasedAmount > 0) {
+            globalStats.totalASDF += newPurchasedAmount;
+            console.log(`> [ASDF] Total New Accumulated: ${newPurchasedAmount}`);
+            // Save handled by closeFrame calling saveSystemState
+        }
+
+    } catch (e) {
+        console.error("> [ASDF] History Check Failed:", e.message);
+    }
+}
 
 // --- 15m LOGIC ---
 function getCurrentWindowStart() {
@@ -281,6 +361,10 @@ async function closeFrame(closePrice, closeTime) {
         const frameId = gameState.candleStartTime; 
         console.log(`> [SYS] Closing Frame: ${frameId}`);
 
+        // --- UPDATE ASDF HISTORY ---
+        // Run this *before* saving state so the stats file includes it
+        await updateASDFPurchases();
+
         const openPrice = gameState.candleOpen;
         let result = "FLAT";
         if (closePrice > openPrice) result = "UP";
@@ -329,7 +413,6 @@ async function closeFrame(closePrice, closeTime) {
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
                 
-                // SAVE DETAILED SHARES
                 userData.frameLog[frameId] = { 
                     dir: userDir, 
                     result: outcome, 
@@ -346,27 +429,20 @@ async function closeFrame(closePrice, closeTime) {
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
-        await saveSystemState();
+        await saveSystemState(); // Saves globalStats (ASDF) + New Frame
 
         processPayouts(frameId, result, betsSnapshot, frameSol);
         
     } finally { release(); }
 }
 
-// --- ORACLE: COINGECKO ---
+// --- ORACLE: BINANCE ---
 async function updatePrice() {
     try {
-        // SWITCHED BACK TO COINGECKO
-        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-            params: { 
-                ids: 'solana', 
-                vs_currencies: 'usd', 
-                x_cg_demo_api_key: COINGECKO_API_KEY 
-            }
-        });
+        const response = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
         
-        if (response.data.solana) {
-            const currentPrice = response.data.solana.usd;
+        if (response.data && response.data.price) {
+            const currentPrice = parseFloat(response.data.price);
             
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
@@ -523,5 +599,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v34 (CoinGecko) running on ${PORT}`);
+    console.log(`> ASDForecast Engine v37 (Transaction Parser) running on ${PORT}`);
 });
