@@ -16,13 +16,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
-const HOUSE_ADDRESS = "H3tY5a5n7C5h2jK8n3m4n5b6v7c8x9z1a2s3d4f5g6h";
+// --- UPDATED VAULT ADDRESS ---
+const HOUSE_ADDRESS = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy";
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
 const PRICE_SCALE = 0.1;
 
 // --- PERSISTENCE CONFIGURATION ---
-// We check if the Render Persistent Disk path exists.
-// If it does (Production), we use it. If not (Localhost), we use the current folder.
 const RENDER_DISK_PATH = '/var/data';
 const DATA_DIR = fs.existsSync(RENDER_DISK_PATH) ? RENDER_DISK_PATH : __dirname;
 
@@ -31,6 +30,7 @@ const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');     
 
 console.log(`> [SYS] Persistence Layer Active. Saving data to: ${DATA_DIR}`);
+console.log(`> [SYS] Vault Address Configured: ${HOUSE_ADDRESS}`);
 
 // --- STATE MANAGEMENT ---
 let gameState = {
@@ -263,5 +263,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v3.1 (Persistent) running on ${PORT}`);
+    console.log(`> ASDForecast Engine v4 (Vault Connected) running on ${PORT}`);
 });
