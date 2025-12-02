@@ -18,12 +18,12 @@ const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
-const PRICE_SCALE = 0.1; 
-const PAYOUT_MULTIPLIER = 0.94; // 94% of the Unit Value (0.1)
-const FEE_PERCENT = 0.0552; // 5.52% of Total Volume
-const RESERVE_SOL = 0.02; // Minimum to keep in wallet
+const PRICE_SCALE = 0.1;
+const FEE_PERCENT = 0.0552; // 5.52%
+const POT_PERCENT = 0.94;   // 94%
+const RESERVE_SOL = 0.02;   // Min wallet balance
 
-// --- PERSISTENCE CONFIGURATION ---
+// --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
 const DATA_DIR = fs.existsSync(RENDER_DISK_PATH) ? RENDER_DISK_PATH : path.join(__dirname, 'data');
 const FRAMES_DIR = path.join(DATA_DIR, 'frames');
@@ -38,26 +38,19 @@ const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 
 console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
-// --- KEY MANAGEMENT (SECURE) ---
+// --- KEY MANAGEMENT ---
 let houseKeypair;
 try {
-    // 1. Try Environment Variable (Production Best Practice)
     if (process.env.SOLANA_WALLET_JSON) {
-        const secret = Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON));
-        houseKeypair = Keypair.fromSecretKey(secret);
-        console.log(`> [AUTH] Loaded Wallet from ENV: ${houseKeypair.publicKey.toString()}`);
-    } 
-    // 2. Try Local File (Dev Fallback)
-    else if (fs.existsSync('house-wallet.json')) {
-        const secret = Uint8Array.from(JSON.parse(fs.readFileSync('house-wallet.json')));
-        houseKeypair = Keypair.fromSecretKey(secret);
-        console.log(`> [AUTH] Loaded Wallet from File: ${houseKeypair.publicKey.toString()}`);
+        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
+        console.log(`> [AUTH] Wallet Loaded (ENV): ${houseKeypair.publicKey.toString()}`);
+    } else if (fs.existsSync('house-wallet.json')) {
+        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync('house-wallet.json'))));
+        console.log(`> [AUTH] Wallet Loaded (File): ${houseKeypair.publicKey.toString()}`);
     } else {
-        console.warn("> [WARN] NO PRIVATE KEY FOUND. PAYOUTS WILL FAIL.");
+        console.warn("> [WARN] NO PRIVATE KEY. Payouts Disabled.");
     }
-} catch (e) {
-    console.error("> [ERR] Wallet Load Failed:", e.message);
-}
+} catch (e) { console.error("> [ERR] Wallet Load Failed:", e.message); }
 
 // --- STATE ---
 let gameState = {
@@ -114,7 +107,7 @@ function saveSystemState() {
 function getUser(pubKey) {
     const file = path.join(USERS_DIR, `user_${pubKey}.json`);
     if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file));
-    return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0 };
+    return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
 }
 
 function saveUser(pubKey, data) {
@@ -132,90 +125,105 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
-// --- PAYOUT ENGINE ---
-async function processPayouts(result, bets, totalVolume) {
-    if (!houseKeypair) return console.log("> [PAYOUT] No Private Key. Skipping.");
-    if (totalVolume === 0) return console.log("> [PAYOUT] No Volume. Skipping.");
+// --- PAYOUT ENGINE (REWORKED) ---
+async function processPayouts(frameId, result, bets, totalVolume) {
+    if (!houseKeypair || totalVolume === 0) return console.log("> [PAYOUT] Skipping (No Key or Volume)");
 
     const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-    console.log(`> [PAYOUT] Processing... Result: ${result} | Vol: ${totalVolume} SOL`);
+    console.log(`> [PAYOUT] Frame ${frameId} | Result: ${result} | Vol: ${totalVolume.toFixed(4)} SOL`);
 
     try {
-        // 1. Check Reserve
+        // 1. Check Safety Reserve
         const balance = await connection.getBalance(houseKeypair.publicKey);
-        const balanceSol = balance / 1e9;
-        
-        if (balanceSol < RESERVE_SOL) {
-            console.error(`> [PAYOUT] CRITICAL: Wallet below reserve (${balanceSol} < ${RESERVE_SOL}). Halting payouts.`);
-            return;
-        }
+        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] HALT: Wallet below 0.02 SOL Reserve.");
 
-        // 2. Pay Fee Wallet
+        // 2. Pay Fee Wallet (5.52%)
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
         if (feeLamports > 0) {
             try {
-                const feeTx = new Transaction().add(
-                    SystemProgram.transfer({
-                        fromPubkey: houseKeypair.publicKey,
-                        toPubkey: FEE_WALLET,
-                        lamports: feeLamports
-                    })
-                );
+                const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
                 await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
-                console.log(`> [PAYOUT] Fee Sent: ${(feeLamports/1e9).toFixed(4)} SOL`);
-            } catch (e) {
-                console.error(`> [PAYOUT] Fee Payment Failed: ${e.message}`);
+                console.log(`> [FEE] Sent ${(feeLamports/1e9).toFixed(4)} SOL`);
+            } catch (e) { console.error("> [FEE] Error:", e.message); }
+        }
+
+        if (result === "FLAT") return console.log("> [PAYOUT] Flat market. No winners.");
+
+        // 3. Calculate Winner's Pot (94%)
+        const potLamports = Math.floor((totalVolume * POT_PERCENT) * 1e9);
+        
+        // 4. Aggregation: Group bets by user to determine Net Position
+        const userPositions = {};
+        bets.forEach(bet => {
+            if (!userPositions[bet.user]) userPositions[bet.user] = { upShares: 0, downShares: 0 };
+            if (bet.direction === 'UP') userPositions[bet.user].upShares += bet.shares;
+            else userPositions[bet.user].downShares += bet.shares;
+        });
+
+        // 5. Determine Eligibility & Total Winning Shares
+        let totalWinningSharesInPool = 0;
+        const eligibleWinners = [];
+
+        for (const [pubKey, pos] of Object.entries(userPositions)) {
+            // Determine User's Majority Direction
+            let userDir = "FLAT";
+            if (pos.upShares > pos.downShares) userDir = "UP";
+            else if (pos.downShares > pos.upShares) userDir = "DOWN";
+
+            // ELIGIBILITY CHECK: Did the user predict correctly?
+            if (userDir === result) {
+                // Determine how many "Correct Shares" they hold
+                const sharesHeld = result === "UP" ? pos.upShares : pos.downShares;
+                
+                totalWinningSharesInPool += sharesHeld;
+                eligibleWinners.push({ pubKey, sharesHeld });
             }
         }
 
-        // 3. Identify Winners & Pay
-        // Group bets by user first to batch payments (1 tx per winner)
-        const userPositions = {};
-        bets.forEach(bet => {
-            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
-            if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-            else userPositions[bet.user].down += bet.shares;
-        });
+        // 6. Distribute Pot
+        if (totalWinningSharesInPool === 0) {
+            console.log("> [PAYOUT] House Wins (No eligible winners for this result).");
+            return;
+        }
 
-        for (const [pubKey, pos] of Object.entries(userPositions)) {
-            let userDirection = "FLAT";
-            if (pos.up > pos.down) userDirection = "UP";
-            else if (pos.down > pos.up) userDirection = "DOWN";
+        console.log(`> [PAYOUT] Distributing ${potLamports/1e9} SOL to ${eligibleWinners.length} winners holding ${totalWinningSharesInPool.toFixed(2)} shares.`);
 
-            // Only pay if they Won
-            if (userDirection === result && result !== "FLAT") {
-                const winningShares = result === "UP" ? pos.up : pos.down;
-                
-                // MATH: Shares * 0.94 * SCALE(0.1)
-                const payoutSol = winningShares * PAYOUT_MULTIPLIER * PRICE_SCALE;
-                const payoutLamports = Math.floor(payoutSol * 1e9);
+        for (const winner of eligibleWinners) {
+            // Proportion: (UserShares / TotalShares) * Pot
+            const shareRatio = winner.sharesHeld / totalWinningSharesInPool;
+            const payoutLamports = Math.floor(potLamports * shareRatio);
 
-                if (payoutLamports > 0) {
-                    try {
-                        const tx = new Transaction().add(
-                            SystemProgram.transfer({
-                                fromPubkey: houseKeypair.publicKey,
-                                toPubkey: new PublicKey(pubKey),
-                                lamports: payoutLamports
-                            })
-                        );
-                        // In production, consider queuing these or using a delay to avoid rate limits
-                        await sendAndConfirmTransaction(connection, tx, [houseKeypair]);
-                        console.log(`> [PAYOUT] Sent ${payoutSol.toFixed(4)} SOL to ${pubKey.slice(0,6)}...`);
-                    } catch (e) {
-                        console.error(`> [PAYOUT] User Payout Failed (${pubKey}): ${e.message}`);
+            if (payoutLamports > 5000) { // Minimum dust threshold (~0.000005 SOL)
+                try {
+                    const tx = new Transaction().add(SystemProgram.transfer({
+                        fromPubkey: houseKeypair.publicKey,
+                        toPubkey: new PublicKey(winner.pubKey),
+                        lamports: payoutLamports
+                    }));
+                    const signature = await sendAndConfirmTransaction(connection, tx, [houseKeypair]);
+                    
+                    const payoutSol = payoutLamports / 1e9;
+                    console.log(`> [PAYOUT] SENT ${payoutSol.toFixed(4)} SOL to ${winner.pubKey.slice(0,4)}`);
+
+                    // Log to User File
+                    const uData = getUser(winner.pubKey);
+                    if (uData.frameLog && uData.frameLog[frameId]) {
+                        uData.frameLog[frameId].payoutTx = signature;
+                        uData.frameLog[frameId].payoutAmount = payoutSol;
+                        saveUser(winner.pubKey, uData);
                     }
+                } catch (e) {
+                    console.error(`> [PAYOUT] FAIL (${winner.pubKey}): ${e.message}`);
                 }
             }
         }
 
-    } catch (e) {
-        console.error("> [PAYOUT] System Error:", e);
-    }
+    } catch (e) { console.error("> [PAYOUT] System Error:", e); }
 }
 
 function closeFrame(closePrice, closeTime) {
-    console.log(`> [SYS] Closing Frame: ${gameState.candleStartTime}`);
+    const frameId = gameState.candleStartTime; 
+    console.log(`> [SYS] Closing Frame: ${frameId}`);
 
     const openPrice = gameState.candleOpen;
     let result = "FLAT";
@@ -224,14 +232,12 @@ function closeFrame(closePrice, closeTime) {
 
     const realSharesUp = Math.max(0, gameState.poolShares.up - 100);
     const realSharesDown = Math.max(0, gameState.poolShares.down - 100);
-    
-    // Calculate total SOL in this frame for Fee calculation
     const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
     // Archive
     const frameRecord = {
-        id: gameState.candleStartTime,
-        time: new Date(gameState.candleStartTime).toISOString(),
+        id: frameId,
+        time: new Date(frameId).toISOString(),
         open: openPrice,
         close: closePrice,
         result: result,
@@ -243,7 +249,7 @@ function closeFrame(closePrice, closeTime) {
     historySummary.unshift(frameRecord); 
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(historySummary));
 
-    // Update User Stats
+    // Update User Stats (Wins/Losses)
     const usersInFrame = {};
     gameState.bets.forEach(bet => {
         if (!usersInFrame[bet.user]) usersInFrame[bet.user] = { up: 0, down: 0 };
@@ -258,16 +264,18 @@ function closeFrame(closePrice, closeTime) {
         if (pos.up > pos.down) userDir = "UP";
         else if (pos.down > pos.up) userDir = "DOWN";
 
-        if (userDir !== "FLAT" && result !== "FLAT") {
-            if (userDir === result) userData.wins += 1;
-            else userData.losses += 1;
-        }
+        const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
+        
+        if (outcome === "WIN") userData.wins += 1;
+        else if (outcome === "LOSS") userData.losses += 1;
+
+        if (!userData.frameLog) userData.frameLog = {};
+        userData.frameLog[frameId] = { dir: userDir, result: outcome, time: Date.now() };
         saveUser(pubKey, userData);
     }
 
     // TRIGGER PAYOUTS (Async)
-    // We pass a copy of bets so clearing state doesn't affect it
-    processPayouts(result, [...gameState.bets], frameSol);
+    processPayouts(frameId, result, [...gameState.bets], frameSol);
 
     // Reset State
     gameState.candleStartTime = closeTime;
@@ -288,13 +296,11 @@ async function updatePrice() {
         if (response.data.solana) {
             const currentPrice = response.data.solana.usd;
             gameState.price = currentPrice;
-            
             const currentWindowStart = getCurrentWindowStart();
             
             if (currentWindowStart > gameState.candleStartTime) {
-                if (gameState.candleStartTime !== 0) {
-                    closeFrame(currentPrice, currentWindowStart);
-                } else {
+                if (gameState.candleStartTime !== 0) closeFrame(currentPrice, currentWindowStart);
+                else {
                     gameState.candleStartTime = currentWindowStart;
                     gameState.candleOpen = currentPrice;
                     saveSystemState();
@@ -304,7 +310,7 @@ async function updatePrice() {
     } catch (e) { console.log("Oracle unstable"); }
 }
 
-setInterval(updatePrice, 30000); 
+setInterval(updatePrice, 10000); 
 updatePrice(); 
 
 // --- ENDPOINTS ---
@@ -354,21 +360,16 @@ app.get('/api/state', (req, res) => {
 
 app.post('/api/verify-bet', async (req, res) => {
     const { signature, direction, userPubKey } = req.body;
-
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
 
     try {
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
         const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
-
-        if (!tx) return res.status(404).json({ error: "TX_NOT_FOUND" });
-        if (tx.meta.err) return res.status(400).json({ error: "TX_FAILED" });
+        if (!tx || tx.meta.err) return res.status(400).json({ error: "TX_INVALID" });
 
         let lamports = 0;
         const instructions = tx.transaction.message.instructions;
-        
-        // Find transfer to House
-        let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; // Fallback to public const if keypair missing locally
+        let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
 
         for (let ix of instructions) {
             if (ix.program === 'system' && ix.parsed.type === 'transfer') {
@@ -404,8 +405,6 @@ app.post('/api/verify-bet', async (req, res) => {
         });
 
         saveSystemState();
-        
-        console.log(`> TRADE: ${userPubKey} | ${direction} | ${sharesReceived.toFixed(2)} Shares`);
         res.json({ success: true, shares: sharesReceived, price: price });
 
     } catch (e) {
@@ -415,7 +414,5 @@ app.post('/api/verify-bet', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v13 (Payouts Enabled) running on ${PORT}`);
-    if (houseKeypair) console.log("> [AUTH] House Keypair is Active.");
-    else console.warn("> [AUTH] WARNING: House Keypair NOT found. Payouts disabled.");
+    console.log(`> ASDForecast Engine v15 (Pot Payouts) running on ${PORT}`);
 });
