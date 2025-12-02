@@ -29,7 +29,7 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "77.0"; // Updated to v77
+const BACKEND_VERSION = "79.0"; // Rounding Update
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -300,17 +300,17 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         const eligibleWinners = [];
 
         for (const [pubKey, pos] of Object.entries(userPositions)) {
-            // --- STRICT DIRECTION CHECK ---
-            let userDir = "FLAT";
-            if (pos.up > pos.down) userDir = "UP";
-            else if (pos.down > pos.up) userDir = "DOWN";
+            // --- ROUNDING FIX: Integer Logic ---
+            const rUp = Math.round(pos.up);
+            const rDown = Math.round(pos.down);
             
-            // Explicit 3rd Check: Hedge Paradox
-            if (pos.up === pos.down) userDir = "FLAT"; 
+            let userDir = "FLAT";
+            if (rUp > rDown) userDir = "UP";
+            else if (rDown > rUp) userDir = "DOWN";
+            else userDir = "FLAT"; // Explicitly Equal
 
-            // Only pay if user matched result
             if (userDir === result) {
-                const sharesHeld = result === "UP" ? pos.up : pos.down;
+                const sharesHeld = result === "UP" ? pos.up : pos.down; // Use precise shares for payout calc
                 totalWinningShares += sharesHeld;
                 eligibleWinners.push({ pubKey, sharesHeld });
             }
@@ -391,9 +391,12 @@ async function closeFrame(closePrice, closeTime) {
                 else userPositions[bet.user].down += bet.shares;
             });
             for (const [pk, pos] of Object.entries(userPositions)) {
-                let dir = pos.up > pos.down ? 'UP' : (pos.down > pos.up ? 'DOWN' : 'FLAT');
-                // Strict check here too
-                if (pos.up === pos.down) dir = 'FLAT';
+                // --- ROUNDING FIX ---
+                const rUp = Math.round(pos.up);
+                const rDown = Math.round(pos.down);
+                let dir = "FLAT";
+                if (rUp > rDown) dir = "UP";
+                else if (rDown > rUp) dir = "DOWN";
                 
                 if (dir === result) winnerCount++;
             }
@@ -420,6 +423,9 @@ async function closeFrame(closePrice, closeTime) {
             userPositions[bet.user].sol += bet.costSol;
         });
 
+        // [DEBUGGING] COLLECT TOP PLAYERS
+        const frameParticipants = [];
+
         const usersToUpdate = Object.entries(userPositions);
         const USER_IO_BATCH_SIZE = 20; 
         for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
@@ -428,11 +434,21 @@ async function closeFrame(closePrice, closeTime) {
                 const userData = await getUser(pubKey);
                 userData.framesPlayed += 1;
                 
+                // --- ROUNDING FIX ---
+                const rUp = Math.round(pos.up);
+                const rDown = Math.round(pos.down);
+
                 let userDir = "FLAT";
-                if (pos.up > pos.down) userDir = "UP";
-                else if (pos.down > pos.up) userDir = "DOWN";
-                // Explicit check for user record
-                if (pos.up === pos.down) userDir = "FLAT";
+                if (rUp > rDown) userDir = "UP";
+                else if (rDown > rUp) userDir = "DOWN";
+                
+                // [DEBUG] Add to list
+                frameParticipants.push({ 
+                    key: pubKey.slice(0, 6), 
+                    shares: Math.max(rUp, rDown), 
+                    sol: pos.sol, 
+                    dir: userDir 
+                });
 
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
@@ -444,6 +460,12 @@ async function closeFrame(closePrice, closeTime) {
                 await saveUser(pubKey, userData);
             }));
         }
+
+        // [DEBUG] LOG TOP 2
+        frameParticipants.sort((a, b) => b.shares - a.shares);
+        console.log(`> [DEBUG] Frame ${frameId} Results:`);
+        if (frameParticipants[0]) console.log(`> 1st: ${frameParticipants[0].key} | Shares: ${frameParticipants[0].shares} | SOL: ${frameParticipants[0].sol.toFixed(2)} | Dir: ${frameParticipants[0].dir}`);
+        if (frameParticipants[1]) console.log(`> 2nd: ${frameParticipants[1].key} | Shares: ${frameParticipants[1].shares} | SOL: ${frameParticipants[1].sol.toFixed(2)} | Dir: ${frameParticipants[1].dir}`);
 
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
@@ -516,7 +538,6 @@ updatePrice();
 processPayoutQueue();
 
 app.get('/api/state', async (req, res) => {
-    // LOCK-FREE READ
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
     const msUntilClose = nextWindowStart - now.getTime();
