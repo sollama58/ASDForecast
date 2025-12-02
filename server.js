@@ -10,17 +10,14 @@ const { Mutex } = require('async-mutex');
 const app = express();
 const stateMutex = new Mutex();
 
-app.use(cors({
-    origin: '*', // Allow all origins for the separate control panel page
-    methods: ['GET', 'POST']
-}));
-
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] })); // Open CORS for Control Panel
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = 'https://api.devnet.solana.com';
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
+const ADMIN_SECRET = "admin-secret-123"; // Simple protection for the cancel endpoint
 
 // --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
@@ -47,7 +44,6 @@ const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
 const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); 
-const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json'); 
 
 console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
@@ -73,7 +69,8 @@ let gameState = {
     poolShares: { up: 50, down: 50 },
     bets: [],
     recentTrades: [],
-    sharePriceHistory: [] 
+    sharePriceHistory: [],
+    isPaused: false // New state for cancellation
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, lastASDFSignature: null };
@@ -99,6 +96,7 @@ function loadGlobalState() {
             gameState.poolShares = savedState.poolShares || { up: 50, down: 50 };
             gameState.recentTrades = savedState.recentTrades || [];
             gameState.sharePriceHistory = savedState.sharePriceHistory || [];
+            gameState.isPaused = savedState.isPaused || false;
             
             const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
             if (fsSync.existsSync(currentFrameFile)) {
@@ -116,7 +114,8 @@ async function saveSystemState() {
             candleStartTime: gameState.candleStartTime,
             poolShares: gameState.poolShares,
             recentTrades: gameState.recentTrades,
-            sharePriceHistory: gameState.sharePriceHistory
+            sharePriceHistory: gameState.sharePriceHistory,
+            isPaused: gameState.isPaused
         }));
         await fs.writeFile(STATS_FILE, JSON.stringify(globalStats));
         if (gameState.candleStartTime > 0) {
@@ -127,7 +126,8 @@ async function saveSystemState() {
                 endTime: gameState.candleStartTime + FRAME_DURATION,
                 open: gameState.candleOpen,
                 poolShares: gameState.poolShares,
-                bets: [...gameState.bets]
+                bets: [...gameState.bets],
+                status: gameState.isPaused ? 'CANCELLED' : 'ACTIVE'
             }));
         }
     } catch (e) { console.error("> [ERR] Save Error:", e); }
@@ -181,84 +181,89 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
-// --- QUEUE & PAYOUTS ---
-async function processPayoutQueue() {
-    const release = await payoutMutex.acquire();
-    try {
-        if (!houseKeypair || !fsSync.existsSync(QUEUE_FILE)) return;
-        let queueData = [];
-        try { queueData = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) { queueData = []; }
-        if (!queueData || queueData.length === 0) return;
+// --- REFUND ENGINE (FOR CANCELLATION) ---
+async function processRefunds(bets) {
+    if (!houseKeypair || bets.length === 0) return;
+    const connection = new Connection(SOLANA_NETWORK, 'confirmed');
+    console.log(`> [REFUND] Processing ${bets.length} refunds...`);
 
-        const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-        let processedCount = 0;
-        
-        while (queueData.length > 0) {
-            const batch = queueData[0];
-            const { type, recipients, frameId } = batch;
-            try {
-                const tx = new Transaction();
-                let hasInstructions = false;
-                const validRecipients = [];
-                
-                if (type === 'USER_PAYOUT') {
-                    for (const item of recipients) {
-                        const uData = await getUser(item.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId] && uData.frameLog[frameId].payoutTx) continue;
-                        validRecipients.push(item);
-                    }
-                } else {
-                     recipients.forEach(r => validRecipients.push(r));
-                }
+    // Aggregate to save txs
+    const refunds = {};
+    let totalFee = 0;
 
-                if (validRecipients.length > 0) {
-                    for (const item of validRecipients) {
-                        tx.add(SystemProgram.transfer({
-                            fromPubkey: houseKeypair.publicKey,
-                            toPubkey: new PublicKey(item.pubKey),
-                            lamports: item.amount
-                        }));
-                        hasInstructions = true;
-                    }
+    bets.forEach(bet => {
+        if (!refunds[bet.user]) refunds[bet.user] = 0;
+        const refundAmt = bet.costSol * 0.99; // 99% Refund
+        refunds[bet.user] += refundAmt;
+        totalFee += (bet.costSol * 0.01); // 1% Fee
+    });
 
-                    if (hasInstructions) {
-                        const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
-                        if (type === 'USER_PAYOUT') {
-                            for (const item of validRecipients) {
-                                const uData = await getUser(item.pubKey);
-                                if (uData.frameLog && uData.frameLog[frameId]) {
-                                    uData.frameLog[frameId].payoutTx = sig;
-                                    uData.frameLog[frameId].payoutAmount = item.amount / 1e9;
-                                    await saveUser(item.pubKey, uData);
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e) { console.error(`> [QUEUE] Batch Failed: ${e.message}`); }
-
-            queueData.shift();
-            processedCount++;
-            if (processedCount % 5 === 0) await fs.writeFile(QUEUE_FILE, JSON.stringify(queueData));
-        }
-        await fs.writeFile(QUEUE_FILE, JSON.stringify(queueData));
-    } catch (e) { console.error("> [QUEUE] Error:", e); }
-    finally { release(); }
-}
-
-async function queuePayouts(frameId, result, bets, totalVolume) {
-    if (totalVolume === 0) return;
-    const queue = []; 
-
-    if (result === "FLAT") {
-        const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
-        if (burnLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: burnLamports }] });
-    } else {
-        const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
-        if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }] });
+    // 1. Send Fee
+    const feeLamports = Math.floor(totalFee * 1e9);
+    if (feeLamports > 0) {
+        try {
+            const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
+            await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
+        } catch(e) { console.error("> [REFUND] Fee Fail", e); }
     }
 
-    if (result !== "FLAT") {
+    // 2. Send Refunds
+    const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: Math.floor(amt * 1e9) }));
+    const BATCH_SIZE = 15;
+
+    for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+        const batch = recipients.slice(i, i + BATCH_SIZE);
+        const tx = new Transaction();
+        batch.forEach(r => {
+            if (r.amount > 0) tx.add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(r.pubKey), lamports: r.amount }));
+        });
+
+        try {
+            const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
+            console.log(`> [REFUND] Batch Sent: ${sig}`);
+        } catch (e) {
+            console.error(`> [REFUND] Batch Failed: ${e.message}`);
+        }
+    }
+}
+
+// --- PAYOUT ENGINE ---
+async function processPayouts(frameId, result, bets, totalVolume) {
+    if (!houseKeypair || totalVolume === 0) return;
+    const connection = new Connection(SOLANA_NETWORK, 'confirmed');
+
+    try {
+        const balance = await connection.getBalance(houseKeypair.publicKey);
+        if ((balance / 1e9) < RESERVE_SOL) return console.error("> [PAYOUT] Reserve Low. Halting.");
+
+        // FLAT MARKET
+        if (result === "FLAT") {
+            const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
+            if (burnLamports > 0) {
+                try {
+                    const burnTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: burnLamports }));
+                    await sendAndConfirmTransaction(connection, burnTx, [houseKeypair]);
+                    await stateMutex.runExclusive(async () => {
+                        globalStats.totalFees += (burnLamports / 1e9);
+                        await saveSystemState();
+                    });
+                } catch (e) {}
+            }
+            return;
+        }
+
+        const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
+        if (feeLamports > 0) {
+            try {
+                const feeTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: FEE_WALLET, lamports: feeLamports }));
+                await sendAndConfirmTransaction(connection, feeTx, [houseKeypair]);
+                await stateMutex.runExclusive(async () => {
+                    globalStats.totalFees += (feeLamports / 1e9);
+                    await saveSystemState();
+                });
+            } catch (e) {}
+        }
+
         const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
         const userPositions = {};
         bets.forEach(bet => {
@@ -274,6 +279,7 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
             let userDir = "FLAT";
             if (pos.up > pos.down) userDir = "UP";
             else if (pos.down > pos.up) userDir = "DOWN";
+
             if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
                 totalWinningShares += sharesHeld;
@@ -284,25 +290,65 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         if (totalWinningShares > 0) {
             const BATCH_SIZE = 15; 
             for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
-                const batchWinners = eligibleWinners.slice(i, i + BATCH_SIZE);
-                const batchRecipients = [];
-                for (const winner of batchWinners) {
+                const batch = eligibleWinners.slice(i, i + BATCH_SIZE);
+                const tx = new Transaction();
+                let hasInstructions = false;
+
+                for (const winner of batch) {
                     const shareRatio = winner.sharesHeld / totalWinningShares;
                     const payoutLamports = Math.floor(potLamports * shareRatio);
-                    if (payoutLamports > 5000) batchRecipients.push({ pubKey: winner.pubKey, amount: payoutLamports });
+
+                    if (payoutLamports > 5000) { 
+                        tx.add(SystemProgram.transfer({
+                            fromPubkey: houseKeypair.publicKey,
+                            toPubkey: new PublicKey(winner.pubKey),
+                            lamports: payoutLamports
+                        }));
+                        hasInstructions = true;
+                    }
                 }
-                if (batchRecipients.length > 0) queue.push({ type: 'USER_PAYOUT', frameId: frameId, recipients: batchRecipients });
+
+                if (hasInstructions) {
+                    try {
+                        const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed' });
+                        batch.forEach(async (w) => {
+                            const uData = await getUser(w.pubKey);
+                            if (uData.frameLog && uData.frameLog[frameId]) {
+                                const shareRatio = w.sharesHeld / totalWinningShares;
+                                const payoutSol = (potLamports * shareRatio) / 1e9;
+                                uData.frameLog[frameId].payoutTx = sig;
+                                uData.frameLog[frameId].payoutAmount = payoutSol;
+                                await saveUser(w.pubKey, uData);
+                            }
+                        });
+                    } catch (e) { console.error(`> [PAYOUT] Batch Failed: ${e.message}`); }
+                }
             }
         }
-    }
 
-    let existingQueue = [];
-    try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
-    const newQueue = existingQueue.concat(queue);
-    await fs.writeFile(QUEUE_FILE, JSON.stringify(newQueue));
-    processPayoutQueue();
+        // SWEEP EXCESS
+        try {
+            const postPayoutBalance = await connection.getBalance(houseKeypair.publicKey);
+            const reserveLamports = SWEEP_TARGET * 1e9; 
+            const txFeeBuffer = 5000;
+            const sweepLamports = postPayoutBalance - reserveLamports - txFeeBuffer;
+
+            if (sweepLamports > 0) {
+                const sweepTx = new Transaction().add(
+                    SystemProgram.transfer({
+                        fromPubkey: houseKeypair.publicKey,
+                        toPubkey: UPKEEP_WALLET,
+                        lamports: sweepLamports
+                    })
+                );
+                await sendAndConfirmTransaction(connection, sweepTx, [houseKeypair]);
+            }
+        } catch (e) {}
+
+    } catch (e) { console.error("> [PAYOUT] System Error:", e); }
 }
 
+// --- FRAME CLOSING ---
 async function closeFrame(closePrice, closeTime) {
     const release = await stateMutex.acquire(); 
     try {
@@ -320,6 +366,26 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
+        // CALC WINNER STATS FOR HISTORY
+        let winnerCount = 0;
+        let payoutTotal = 0;
+
+        if (result !== "FLAT") {
+            const potSol = frameSol * 0.94;
+            // Simulating winner count
+            const userPositions = {};
+            gameState.bets.forEach(bet => {
+                if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
+                if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
+                else userPositions[bet.user].down += bet.shares;
+            });
+            for (const [pk, pos] of Object.entries(userPositions)) {
+                let dir = pos.up > pos.down ? 'UP' : (pos.down > pos.up ? 'DOWN' : 'FLAT');
+                if (dir === result) winnerCount++;
+            }
+            if (winnerCount > 0) payoutTotal = potSol;
+        }
+
         const frameRecord = {
             id: frameId,
             startTime: frameId,
@@ -330,7 +396,9 @@ async function closeFrame(closePrice, closeTime) {
             result: result,
             sharesUp: realSharesUp, 
             sharesDown: realSharesDown, 
-            totalSol: frameSol
+            totalSol: frameSol,
+            winners: winnerCount, // NEW
+            payout: payoutTotal   // NEW
         };
         historySummary.unshift(frameRecord); 
         await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
@@ -366,18 +434,21 @@ async function closeFrame(closePrice, closeTime) {
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
-        await queuePayouts(frameId, result, betsSnapshot, frameSol);
-
+        // If cancelled frame, logic handled by separate endpoint.
+        // This is normal close.
         gameState.candleStartTime = closeTime;
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
         gameState.sharePriceHistory = [];
         await saveSystemState();
+
+        processPayouts(frameId, result, betsSnapshot, frameSol);
         
     } finally { release(); }
 }
 
+// --- ORACLE ---
 async function updatePrice() {
     try {
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
@@ -390,6 +461,21 @@ async function updatePrice() {
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
+                
+                // IF PAUSED, DO NOT RESET AUTOMATICALLY UNTIL WINDOW MATCHES
+                if (gameState.isPaused) {
+                    // Check if we are in a NEW window relative to when it was paused/started?
+                    // Logic: If paused, we wait for next natural window.
+                    if (currentWindowStart > gameState.candleStartTime) {
+                        console.log("> [SYS] Unpausing for new Frame.");
+                        gameState.isPaused = false; // AUTO UNPAUSE
+                        gameState.candleStartTime = currentWindowStart;
+                        gameState.candleOpen = currentPrice;
+                        await saveSystemState();
+                    }
+                    return; // Skip normal logic while paused
+                }
+
                 if (currentWindowStart > gameState.candleStartTime) {
                     if (gameState.candleStartTime === 0) {
                         gameState.candleStartTime = currentWindowStart;
@@ -398,22 +484,22 @@ async function updatePrice() {
                     }
                 }
 
+                // Snapshot logic...
                 const totalS = gameState.poolShares.up + gameState.poolShares.down;
                 const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
                 const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
-                
                 if (!gameState.sharePriceHistory) gameState.sharePriceHistory = [];
                 gameState.sharePriceHistory.push({ t: Date.now(), up: pUp, down: pDown });
-                
                 const FIVE_MINS = 5 * 60 * 1000;
                 gameState.sharePriceHistory = gameState.sharePriceHistory.filter(x => x.t > Date.now() - FIVE_MINS);
-                
                 await saveSystemState();
             });
             
-            const currentWindowStart = getCurrentWindowStart();
-            if (currentWindowStart > gameState.candleStartTime && gameState.candleStartTime !== 0) {
-                await closeFrame(currentPrice, currentWindowStart);
+            if (!gameState.isPaused) {
+                const currentWindowStart = getCurrentWindowStart();
+                if (currentWindowStart > gameState.candleStartTime && gameState.candleStartTime !== 0) {
+                    await closeFrame(currentPrice, currentWindowStart);
+                }
             }
         }
     } catch (e) { console.log("Oracle unstable"); }
@@ -421,45 +507,33 @@ async function updatePrice() {
 
 setInterval(updatePrice, 10000); 
 updatePrice(); 
-processPayoutQueue();
 
-// --- ENDPOINTS ---
+// --- API ---
 app.get('/api/state', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
+        // ... (Same stat calc logic)
         const now = new Date();
         const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
         const msUntilClose = nextWindowStart - now.getTime();
-
         const priceChange = gameState.price - gameState.candleOpen;
         const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
         const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
-
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-
         const nowTime = Date.now();
         const history = gameState.sharePriceHistory || [];
-        
         const baseline = { up: 0.05, down: 0.05 };
-        
         const oneMinAgo = history.find(x => x.t >= nowTime - 60000) || baseline;
         const fiveMinAgo = history.find(x => x.t >= nowTime - 300000) || baseline;
-
-        function getPercentChange(current, old) {
-            if (!old || old === 0) return 0;
-            return ((current - old) / old) * 100;
-        }
-
+        function getPercentChange(current, old) { if (!old || old === 0) return 0; return ((current - old) / old) * 100; }
         const changes = {
             up1m: getPercentChange(priceUp, oneMinAgo.up),
             up5m: getPercentChange(priceUp, fiveMinAgo.up),
             down1m: getPercentChange(priceDown, oneMinAgo.down),
             down5m: getPercentChange(priceDown, fiveMinAgo.down),
         };
-
-        // --- NEW: CALCULATE UNIQUE WALLETS ---
         const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
 
         const userKey = req.query.user;
@@ -486,9 +560,9 @@ app.get('/api/state', async (req, res) => {
             change: percentChange,
             msUntilClose: msUntilClose,
             currentVolume: currentVolume,
-            // SEND UNIQUE WALLET COUNT
             uniqueUsers: uniqueUsers,
             platformStats: globalStats,
+            isPaused: gameState.isPaused, // SEND PAUSED STATE
             market: {
                 priceUp, priceDown,
                 sharesUp: gameState.poolShares.up,
@@ -504,9 +578,10 @@ app.get('/api/state', async (req, res) => {
 });
 
 app.post('/api/verify-bet', async (req, res) => {
+    if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
+    // ... (Rest of verify-bet logic remains identical)
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
-
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
 
     let solAmount = 0;
@@ -515,7 +590,6 @@ app.post('/api/verify-bet', async (req, res) => {
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
         const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
         if (!tx || tx.meta.err) return res.status(400).json({ error: "TX_INVALID" });
-        
         txBlockTime = tx.blockTime * 1000;
         let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
         const instructions = tx.transaction.message.instructions;
@@ -534,6 +608,7 @@ app.post('/api/verify-bet', async (req, res) => {
     try {
         if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
         if (txBlockTime < gameState.candleStartTime) return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
+        if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" }); // Double check inside lock
 
         const totalShares = gameState.poolShares.up + gameState.poolShares.down;
         let price = 0.05; 
@@ -572,6 +647,51 @@ app.post('/api/verify-bet', async (req, res) => {
     } finally { release(); }
 });
 
+// --- ADMIN: CANCEL FRAME ---
+app.post('/api/admin/cancel-frame', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (auth !== ADMIN_SECRET) return res.status(403).json({ error: "UNAUTHORIZED" });
+
+    const release = await stateMutex.acquire();
+    try {
+        if (gameState.bets.length === 0) {
+            gameState.isPaused = true;
+            await saveSystemState();
+            return res.json({ success: true, message: "Paused. No bets to refund." });
+        }
+
+        console.log(`> [ADMIN] CANCELLING FRAME. Refunding ${gameState.bets.length} bets...`);
+        
+        // Snapshot for refund
+        const betsToRefund = [...gameState.bets];
+        
+        // Mark as cancelled history
+        const frameRecord = {
+            id: gameState.candleStartTime,
+            time: new Date(gameState.candleStartTime).toISOString(),
+            result: "CANCELLED",
+            totalSol: 0, winners: 0, payout: 0
+        };
+        historySummary.unshift(frameRecord);
+        await fs.writeFile(HISTORY_FILE, JSON.stringify(historySummary));
+
+        // Reset State
+        gameState.bets = [];
+        gameState.poolShares = { up: 50, down: 50 };
+        gameState.isPaused = true; // PAUSE MARKET
+        await saveSystemState();
+
+        // Process Refunds (Async)
+        processRefunds(betsToRefund);
+
+        res.json({ success: true, message: "Frame Cancelled. Refunds processing. Market Paused." });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "ADMIN_ERROR" });
+    } finally { release(); }
+});
+
 app.listen(PORT, () => {
-    console.log(`> ASDForecast Engine v52 running on ${PORT}`);
+    console.log(`> ASDForecast Engine v53 (Admin Features) running on ${PORT}`);
 });
