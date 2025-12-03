@@ -16,22 +16,23 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// --- CONFIGURATION ---
+// --- MAINNET CONFIGURATION ---
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
+
+// --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
 const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
-
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const RESERVE_SOL = 0.02;
+const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "101.0"; // Priority Fees + Batch Optimization
+const BACKEND_VERSION = "101.1"; // Mainnet + Priority Fees
 
-// [OPTIMIZATION] Priority Fee (MicroLamports). 
-// 50000 is a healthy baseline for Mainnet to ensure inclusion.
+// [OPTIMIZATION] Priority Fee (MicroLamports)
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- PERSISTENCE ---
@@ -51,7 +52,7 @@ const SIGS_FILE = path.join(DATA_DIR, 'signatures.log');
 const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json'); 
 
 console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
-if (!process.env.HELIUS_API_KEY) console.warn("⚠️ [WARN] HELIUS_API_KEY is missing!");
+if (!process.env.HELIUS_API_KEY) console.warn("⚠️ [WARN] HELIUS_API_KEY is missing! RPC calls may fail.");
 
 // --- HELPER: ATOMIC WRITE ---
 async function atomicWrite(filePath, data) {
@@ -94,6 +95,7 @@ let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, lastASDFSignature: null };
 let processedSignatures = new Set(); 
 
+// --- I/O ---
 function loadGlobalState() {
     try {
         if (fsSync.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fsSync.readFileSync(HISTORY_FILE));
@@ -109,7 +111,7 @@ function loadGlobalState() {
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState = { ...gameState, ...savedState };
-            gameState.isResetting = false; 
+            gameState.isResetting = false; // Reset lock on boot
             
             if (gameState.candleStartTime > 0) {
                 const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
@@ -132,7 +134,9 @@ async function saveSystemState() {
         isPaused: gameState.isPaused,
         isResetting: gameState.isResetting
     });
+    
     await atomicWrite(STATS_FILE, globalStats);
+
     if (gameState.candleStartTime > 0) {
         const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
         await atomicWrite(frameFile, {
@@ -205,7 +209,7 @@ async function processPayoutQueue() {
         try { queueData = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) { queueData = []; }
         if (!queueData || queueData.length === 0) return;
 
-        console.log(`> [QUEUE] Processing ${queueData.length} batches with Priority Fees...`);
+        console.log(`> [QUEUE] Processing ${queueData.length} batches...`);
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
         let processedCount = 0;
         
@@ -215,7 +219,7 @@ async function processPayoutQueue() {
             try {
                 const tx = new Transaction();
                 
-                // [OPTIMIZATION] ADD PRIORITY FEE INSTRUCTION
+                // [OPTIMIZATION] Add Priority Fees
                 const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({
                     microLamports: PRIORITY_FEE_UNITS 
                 });
@@ -229,7 +233,6 @@ async function processPayoutQueue() {
                         const uData = await getUser(item.pubKey);
                         if (uData.frameLog && uData.frameLog[frameId]) {
                             const entry = uData.frameLog[frameId];
-                            // Strict Idempotency
                             if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
                             if (type === 'USER_REFUND' && entry.refundTx) continue;
                         }
@@ -252,7 +255,7 @@ async function processPayoutQueue() {
                     if (hasInstructions) {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { 
                             commitment: 'confirmed',
-                            maxRetries: 5 // [OPTIMIZATION] Retry logic
+                            maxRetries: 5 // [OPTIMIZATION] Retries
                         });
                         console.log(`> [QUEUE] Batch Sent: ${sig}`);
 
@@ -327,7 +330,7 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         }
 
         if (totalWinningShares > 0) {
-            const BATCH_SIZE = 12; // [OPTIMIZATION] Reduced batch size for safety
+            const BATCH_SIZE = 12; // [OPTIMIZATION] Reduced Batch Size
             for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
                 const batchWinners = eligibleWinners.slice(i, i + BATCH_SIZE);
                 const batchRecipients = [];
@@ -362,7 +365,7 @@ async function processRefunds(frameId, bets) {
     if (totalFee > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: Math.floor(totalFee) }] });
     const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: amt }));
     
-    const BATCH_SIZE = 12; // [OPTIMIZATION] Reduced batch size
+    const BATCH_SIZE = 12; // [OPTIMIZATION]
     for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
         queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch }); 
@@ -443,6 +446,7 @@ async function closeFrame(closePrice, closeTime) {
                 
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
+
                 let userDir = "FLAT";
                 if (rUp > rDown) userDir = "UP";
                 else if (rDown > rUp) userDir = "DOWN";
@@ -546,6 +550,7 @@ updatePrice();
 processPayoutQueue();
 
 app.get('/api/state', async (req, res) => {
+    // LOCK-FREE READ
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
     const msUntilClose = nextWindowStart - now.getTime();
