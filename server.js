@@ -12,13 +12,15 @@ const app = express();
 const stateMutex = new Mutex();
 const payoutMutex = new Mutex();
 
+// Enable trust proxy if behind a load balancer (like Render) to get real IPs for rate limiting
+app.set('trust proxy', 1);
+
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
 // --- MAINNET CONFIGURATION ---
-// SECURITY NOTE: Ensure HELIUS_API_KEY is set in your Render Environment Variables
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
@@ -34,20 +36,29 @@ const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; // 0.48%
-const RESERVE_SOL = 0.02;
-const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "115.0"; // UPDATE: Refactored Cancellation Logic
+const BACKEND_VERSION = "116.0"; // UPDATE: Scalability Guards
 
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- RATE LIMITING ---
+// 1. Critical Write Limiter (Bets) - Strict
 const betLimiter = rateLimit({
-	windowMs: 1 * 60 * 1000, // 1 minute
-	max: 10, // limit each IP to 10 verification requests per minute
+	windowMs: 1 * 60 * 1000, 
+	max: 10, 
     message: { error: "RATE_LIMIT_EXCEEDED" },
 	standardHeaders: true,
 	legacyHeaders: false,
+});
+
+// 2. Read Limiter (State) - Generous but protective
+// Allows ~2 requests per second burst, or consistent polling every 2s
+const stateLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, 
+    max: 120, // 120 requests per minute per IP
+    message: { error: "POLLING_LIMIT_EXCEEDED" },
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
 // --- PERSISTENCE ---
@@ -434,8 +445,7 @@ async function processRefunds(frameId, bets) {
     processPayoutQueue();
 }
 
-// --- SHARED CANCELLATION LOGIC (NEW REFACTOR) ---
-// Centralized function used by auto-cancel and admin endpoint
+// --- SHARED CANCELLATION LOGIC ---
 async function cancelCurrentFrameAndRefund() {
     gameState.isPaused = true;
     gameState.isCancelled = true;
@@ -445,19 +455,15 @@ async function cancelCurrentFrameAndRefund() {
         const betsToRefund = [...gameState.bets];
         const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
         
-        // Add cancellation record to history
         historySummary.unshift(frameRecord);
         if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
 
-        // Reset current frame state
         gameState.bets = [];
         gameState.poolShares = { up: 50, down: 50 };
         
-        // Queue the actual SOL refunds
         processRefunds(gameState.candleStartTime, betsToRefund);
     }
-    // Persist the paused/cancelled state
     await saveSystemState();
 }
 
@@ -551,6 +557,7 @@ async function closeFrame(closePrice, closeTime) {
             }));
         }
 
+        // SCALABILITY FIX: Memory Cleanup
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
@@ -605,7 +612,6 @@ async function updatePrice() {
                 const timeRemaining = (gameState.candleStartTime + FRAME_DURATION) - Date.now();
                 if (!gameState.isCancelled && timeRemaining < 300000 && timeRemaining > 0) {
                     console.log("⚠️ Auto-cancelling due to prolonged pause...");
-                    // MODIFIED: Call the new centralized cancellation logic
                     await cancelCurrentFrameAndRefund(); 
                     return;
                 }
@@ -667,7 +673,8 @@ updatePrice();
 processPayoutQueue();
 
 // --- ENDPOINTS ---
-app.get('/api/state', async (req, res) => {
+// UPDATE: Added stateLimiter to protect against DDoS
+app.get('/api/state', stateLimiter, async (req, res) => {
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
     const msUntilClose = nextWindowStart - now.getTime();
@@ -718,12 +725,10 @@ app.get('/api/state', async (req, res) => {
     });
 });
 
-// --- SHARE IMAGE ENDPOINT ---
 app.get('/api/share-image', (req, res) => {
     res.json({ image: cachedShareImage });
 });
 
-// Apply rate limiting to the critical bet path
 app.post('/api/verify-bet', betLimiter, async (req, res) => {
     if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
     if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
@@ -732,7 +737,6 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
     
-    // Memory Cache Check
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
 
     let solAmount = 0;
@@ -767,12 +771,10 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
         if (direction === 'UP') price = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         else price = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
         
-        // Sanity Check: Prevent division by zero or extremely low price exploits
         if(price < 0.001) price = 0.001;
 
         const sharesReceived = solAmount / price;
         
-        // Robustness: Ensure shares are finite numbers
         if (!Number.isFinite(sharesReceived) || sharesReceived <= 0) {
              return res.status(500).json({ error: "CALCULATION_ERROR" });
         }
@@ -819,7 +821,6 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
     const release = await stateMutex.acquire();
     try {
-        // MODIFIED: Call the new unified cancellation function
         await cancelCurrentFrameAndRefund();
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 

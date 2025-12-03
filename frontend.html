@@ -1,4 +1,4 @@
-<!-- ASDForecast v107.0 // MASTER MERGE: SHARE CARD WALLET ID -->
+<!-- ASDForecast v108.0 // MASTER MERGE: SHARE UI & POLL JITTER -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -241,7 +241,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v107.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v108.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -267,7 +267,7 @@
     let PublicKey, SystemProgram, Transaction;
     let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null };
     let ui = {};
-    let pollInterval = null; // Store interval ID
+    let pollTimeout = null; // Store timeout ID for cleanup
 
     window.addEventListener('load', () => {
         if (window.solanaWeb3) {
@@ -319,17 +319,15 @@
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
             if (document.hidden) {
-                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+                if (pollTimeout) { clearTimeout(pollTimeout); pollTimeout = null; }
             } else {
                 poll(); // Immediate update on wake
-                if (!pollInterval) pollInterval = setInterval(poll, 2000);
             }
         });
 
         // Start polling initially
-        pollInterval = setInterval(poll, 2000);
+        poll(); 
         setInterval(updateTimer, 1000);
-        poll();
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
     });
 
@@ -416,11 +414,18 @@
 
              // ADDED: Wallet ID Draw
              if (state.pubKey) {
-                 ctx.font = "bold 24px sans-serif";
-                 ctx.fillStyle = "#fb923c"; // Orange 400
                  ctx.textAlign = "right";
-                 // Draw first 5 chars + ...
-                 ctx.fillText(state.pubKey.toString().slice(0, 5) + "...", 760, 60);
+                 // STROKE FOR CONTRAST
+                 ctx.lineWidth = 6;
+                 ctx.strokeStyle = 'black';
+                 ctx.font = "bold 32px sans-serif";
+                 const txt = state.pubKey.toString().slice(0, 5) + "...";
+                 ctx.strokeText(txt, 760, 60);
+                 
+                 // FILL
+                 ctx.fillStyle = "white"; 
+                 ctx.fillText(txt, 760, 60);
+                 
                  ctx.textAlign = "left"; // Reset for subsequent draws
              }
 
@@ -684,33 +689,10 @@
             state.isOnline = false;
             if(ui.topStatus) ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-red-900/50 transition-colors duration-500";
             if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; }
+        } finally {
+            // Recursive polling with Jitter (0-400ms)
+            const jitter = Math.floor(Math.random() * 400);
+            pollTimeout = setTimeout(poll, 2000 + jitter);
         }
-    }
-
-    async function buy(dir) {
-        // LOCAL LOCKDOWN
-        if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) {
-            return alert("Market has closed. Calculating results.");
-        }
-
-        if(!state.isOnline) return alert("System Offline");
-        const qty = parseInt(ui.qty.value);
-        const cost = qty * (dir==='UP'?state.prices.up:state.prices.down);
-        const btn = dir==='UP'?ui.btnUp:ui.btnDown;
-        const old = btn.innerHTML;
-        btn.innerHTML = "SIGNING..."; btn.disabled = true;
-
-        try {
-            const tx = new Transaction();
-            const { blockhash } = await state.conn.getLatestBlockhash();
-            tx.recentBlockhash = blockhash; tx.feePayer = state.pubKey;
-            tx.add(SystemProgram.transfer({ fromPubkey: state.pubKey, toPubkey: new PublicKey(HOUSE_PUBKEY), lamports: Math.round(cost * solanaWeb3.LAMPORTS_PER_SOL) }));
-            const sig = await window.solana.signAndSendTransaction(tx);
-            btn.innerHTML = "VERIFYING...";
-            await state.conn.confirmTransaction(sig.signature, 'confirmed');
-            const res = await fetch(`${API_URL}/verify-bet`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ signature: sig.signature, direction: dir, userPubKey: state.pubKey.toString() }) });
-            const d = await res.json();
-            if(d.success) { alert(`Bought ${Math.round(d.shares)} shares!`); refreshBalance(); } else alert(d.error);
-        } catch(e) { console.error(e); alert("Tx Failed"); } finally { btn.innerHTML = old; btn.disabled = false; }
     }
 </script>
