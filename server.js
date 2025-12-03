@@ -167,7 +167,7 @@ async function saveUser(pubKey, data) {
 loadGlobalState();
 
 async function updateASDFPurchases() {
-    const connection = new Connection(HELIUS_MAINNET_URL); 
+    const connection = new Connection(SOLANA_NETWORK); 
     try {
         const options = { limit: 20 };
         if (globalStats.lastASDFSignature) options.until = globalStats.lastASDFSignature;
