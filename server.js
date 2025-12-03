@@ -31,10 +31,11 @@ const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
+const UPKEEP_PERCENT = 0.0048; // 0.48%
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "109.0"; // Added Pause Toggle
+const BACKEND_VERSION = "111.0"; // Double Oracle Restored
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -91,7 +92,8 @@ let gameState = {
     recentTrades: [],
     sharePriceHistory: [],
     isPaused: false,
-    isResetting: false
+    isResetting: false,
+    isCancelled: false
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, lastASDFSignature: null };
@@ -135,6 +137,7 @@ async function saveSystemState() {
         sharePriceHistory: gameState.sharePriceHistory,
         isPaused: gameState.isPaused,
         isResetting: gameState.isResetting,
+        isCancelled: gameState.isCancelled,
         lastPriceTimestamp: gameState.lastPriceTimestamp
     });
     
@@ -142,6 +145,7 @@ async function saveSystemState() {
 
     if (gameState.candleStartTime > 0) {
         const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
+        const status = gameState.isCancelled ? 'CANCELLED' : (gameState.isPaused ? 'PAUSED' : (gameState.isResetting ? 'RESETTING' : 'ACTIVE'));
         await atomicWrite(frameFile, {
             id: gameState.candleStartTime,
             startTime: gameState.candleStartTime,
@@ -149,7 +153,7 @@ async function saveSystemState() {
             open: gameState.candleOpen,
             poolShares: gameState.poolShares,
             bets: [...gameState.bets],
-            status: gameState.isPaused ? 'CANCELLED' : (gameState.isResetting ? 'RESETTING' : 'ACTIVE')
+            status: status
         });
     }
 }
@@ -200,39 +204,25 @@ async function updateLeaderboard() {
     try {
         const files = await fs.readdir(USERS_DIR);
         const leaders = [];
-        
         for (const file of files) {
             if (!file.endsWith('.json')) continue;
             try {
                 const raw = await fs.readFile(path.join(USERS_DIR, file), 'utf8');
                 const data = JSON.parse(raw);
-                
                 let totalWon = 0;
                 if (data.frameLog) {
-                    Object.values(data.frameLog).forEach(log => {
-                        if (log.payoutAmount) totalWon += log.payoutAmount;
-                    });
+                    Object.values(data.frameLog).forEach(log => { if (log.payoutAmount) totalWon += log.payoutAmount; });
                 }
-
                 const totalGames = data.wins + data.losses;
                 if (totalGames > 0) {
-                     leaders.push({
-                        pubKey: file.replace('user_', '').replace('.json', ''),
-                        wins: data.wins,
-                        bets: totalGames, 
-                        winRate: (data.wins / totalGames) * 100,
-                        totalWon: totalWon
-                    });
+                     leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
                 }
             } catch(e) {}
         }
-        
         leaders.sort((a, b) => b.totalWon - a.totalWon);
         globalLeaderboard = leaders.slice(0, 5); 
-        
     } catch (e) { console.error("Leaderboard Error:", e.message); }
 }
-
 setInterval(updateLeaderboard, 60000); 
 updateLeaderboard(); 
 
@@ -255,7 +245,6 @@ async function processPayoutQueue() {
 
         console.log(`> [QUEUE] Processing ${queueData.length} batches...`);
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-        let processedCount = 0;
         
         while (queueData.length > 0) {
             const batch = queueData[0];
@@ -317,10 +306,8 @@ async function processPayoutQueue() {
             } catch (e) { console.error(`> [QUEUE] Batch Failed: ${e.message}`); }
 
             queueData.shift();
-            processedCount++;
-            if (processedCount % 5 === 0) await atomicWrite(QUEUE_FILE, queueData);
+            await atomicWrite(QUEUE_FILE, queueData);
         }
-        await atomicWrite(QUEUE_FILE, queueData);
     } catch (e) { console.error("> [QUEUE] Error:", e); }
     finally { release(); }
 }
@@ -333,8 +320,11 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
         if (burnLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: burnLamports }] });
     } else {
-        const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9);
+        const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9); 
+        const upkeepLamports = Math.floor((totalVolume * UPKEEP_PERCENT) * 1e9); 
+        
         if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }] });
+        if (upkeepLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: UPKEEP_WALLET.toString(), amount: upkeepLamports }] });
     }
 
     if (result !== "FLAT") {
@@ -352,11 +342,10 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         for (const [pubKey, pos] of Object.entries(userPositions)) {
             const rUp = Math.round(pos.up * 10000) / 10000;
             const rDown = Math.round(pos.down * 10000) / 10000;
-            
             let userDir = "FLAT";
             if (rUp > rDown) userDir = "UP";
             else if (rDown > rUp) userDir = "DOWN";
-            if (pos.up === pos.down) userDir = "FLAT"; 
+            if (rUp === rDown) userDir = "FLAT"; 
 
             if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
@@ -385,6 +374,25 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
     const newQueue = existingQueue.concat(queue);
     await atomicWrite(QUEUE_FILE, newQueue);
     processPayoutQueue();
+}
+
+// --- SHARED CANCELLATION LOGIC ---
+async function executeFrameCancellation() {
+    gameState.isPaused = true;
+    gameState.isCancelled = true;
+    
+    if (gameState.bets.length > 0) {
+        console.log(`> [CANCEL] Auto/Admin Cancellation. Refunding ${gameState.bets.length} bets...`);
+        const betsToRefund = [...gameState.bets];
+        const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
+        historySummary.unshift(frameRecord);
+        await atomicWrite(HISTORY_FILE, historySummary);
+
+        gameState.bets = [];
+        gameState.poolShares = { up: 50, down: 50 };
+        processRefunds(gameState.candleStartTime, betsToRefund);
+    }
+    await saveSystemState();
 }
 
 async function processRefunds(frameId, bets) {
@@ -549,28 +557,46 @@ async function updatePrice() {
         await stateMutex.runExclusive(async () => {
             gameState.price = fetchedPrice;
             gameState.lastPriceTimestamp = Date.now();
+            
             const currentWindowStart = getCurrentWindowStart();
 
             if (gameState.isResetting) return;
             
             if (gameState.isPaused) {
+                const timeRemaining = (gameState.candleStartTime + FRAME_DURATION) - Date.now();
+                
+                // Auto-Cancel Trigger
+                if (!gameState.isCancelled && timeRemaining < 300000 && timeRemaining > 0) {
+                    console.log("⚠️ Auto-cancelling due to prolonged pause...");
+                    await executeFrameCancellation();
+                    return;
+                }
+
                 if (currentWindowStart > gameState.candleStartTime) {
                     console.log("> [SYS] Unpausing for new Frame.");
-                    const skippedFrameRecord = {
-                        id: gameState.candleStartTime,
-                        startTime: gameState.candleStartTime,
-                        endTime: gameState.candleStartTime + FRAME_DURATION,
-                        time: new Date(gameState.candleStartTime).toISOString(),
-                        open: gameState.candleOpen,
-                        close: fetchedPrice,
-                        result: "PAUSED", 
-                        sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
-                    };
-                    historySummary.unshift(skippedFrameRecord);
-                    if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
-                    await atomicWrite(HISTORY_FILE, historySummary);
+                    
+                    // If it wasn't cancelled, log it as PAUSED
+                    if (!gameState.isCancelled) {
+                         const skippedFrameRecord = {
+                            id: gameState.candleStartTime,
+                            startTime: gameState.candleStartTime,
+                            endTime: gameState.candleStartTime + FRAME_DURATION,
+                            time: new Date(gameState.candleStartTime).toISOString(),
+                            open: gameState.candleOpen,
+                            close: fetchedPrice,
+                            result: "PAUSED", 
+                            sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
+                        };
+                        historySummary.unshift(skippedFrameRecord);
+                        if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
+                        await atomicWrite(HISTORY_FILE, historySummary);
+                        gameState.isPaused = false; 
+                    } else {
+                        // If cancelled, just reset flags for new frame
+                        gameState.isCancelled = false;
+                        gameState.isPaused = false;
+                    }
 
-                    gameState.isPaused = false; 
                     gameState.candleStartTime = currentWindowStart;
                     gameState.candleOpen = fetchedPrice;
                     await saveSystemState();
@@ -646,18 +672,19 @@ app.get('/api/state', async (req, res) => {
     res.json({
         price: gameState.price, openPrice: gameState.candleOpen, candleStartTime: gameState.candleStartTime, candleEndTime: gameState.candleStartTime + FRAME_DURATION,
         change: percentChange, msUntilClose: msUntilClose, currentVolume: currentVolume, uniqueUsers: uniqueUsers,
-        platformStats: globalStats, isPaused: gameState.isPaused, isResetting: gameState.isResetting,
+        platformStats: globalStats, isPaused: gameState.isPaused, isResetting: gameState.isResetting, isCancelled: gameState.isCancelled,
         market: { priceUp, priceDown, sharesUp: gameState.poolShares.up, sharesDown: gameState.poolShares.down, changes: changes },
         history: historySummary, recentTrades: gameState.recentTrades, userStats: myStats, activePosition: activePosition,
-        backendVersion: BACKEND_VERSION,
-        leaderboard: globalLeaderboard,
-        lastPriceTimestamp: gameState.lastPriceTimestamp
+        leaderboard: globalLeaderboard, lastPriceTimestamp: gameState.lastPriceTimestamp,
+        backendVersion: BACKEND_VERSION
     });
 });
 
 app.post('/api/verify-bet', async (req, res) => {
     if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
     if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
+    if (gameState.isCancelled) return res.status(400).json({ error: "MARKET_CANCELLED" });
+
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
@@ -718,7 +745,6 @@ app.post('/api/verify-bet', async (req, res) => {
     } catch (e) { console.error(e); res.status(500).json({ error: "STATE_ERROR" }); } finally { release(); }
 });
 
-// --- NEW ADMIN TOGGLE ENDPOINT ---
 app.post('/api/admin/toggle-pause', async (req, res) => {
     const auth = req.headers['x-admin-secret'];
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
@@ -726,8 +752,8 @@ app.post('/api/admin/toggle-pause', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
         gameState.isPaused = !gameState.isPaused;
+        if (!gameState.isPaused) gameState.isCancelled = false; 
         await saveSystemState();
-        
         console.log(`> [ADMIN] Market Paused State toggled to: ${gameState.isPaused}`);
         res.json({ success: true, isPaused: gameState.isPaused });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
@@ -739,21 +765,7 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
     const release = await stateMutex.acquire();
     try {
-        gameState.isPaused = true;
-        await saveSystemState();
-
-        if (gameState.bets.length > 0) {
-            console.log(`> [ADMIN] CANCELLING FRAME. Refunding ${gameState.bets.length} bets...`);
-            const betsToRefund = [...gameState.bets];
-            const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
-            historySummary.unshift(frameRecord);
-            await atomicWrite(HISTORY_FILE, historySummary);
-
-            gameState.bets = [];
-            gameState.poolShares = { up: 50, down: 50 };
-            await saveSystemState();
-            processRefunds(gameState.candleStartTime, betsToRefund);
-        }
+        await executeFrameCancellation();
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
     finally { release(); }
