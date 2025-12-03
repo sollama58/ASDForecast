@@ -1,5 +1,4 @@
-<!-- ASDForecast v105.0 // MASTER MERGE: RATE LIMITING & VISIBILITY OPTIMIZATION -->
-<!-- SECURITY WARNING: Ensure you restrict your Helius RPC Key to your domain in the Helius Dashboard to prevent theft. -->
+<!-- ASDForecast v106.0 // MASTER MERGE: SHARE CARD FONT IMPROVEMENT -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -242,7 +241,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v105.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v106.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -408,10 +407,11 @@
 
              // Title
              ctx.strokeStyle = 'black'; ctx.lineWidth = 6;
-             ctx.font = "bold 40px monospace"; ctx.fillStyle = "white"; 
+             // MODIFIED: Switched from monospace to sans-serif for better readability
+             ctx.font = "bold 40px sans-serif"; ctx.fillStyle = "white"; 
              ctx.strokeText("ASDForecast", 40, 60); ctx.fillText("ASDForecast", 40, 60);
              
-             ctx.font = "20px monospace"; ctx.fillStyle = "#fb923c"; 
+             ctx.font = "20px sans-serif"; ctx.fillStyle = "#fb923c"; 
              ctx.strokeText("15m Binary Prediction Market", 40, 90); ctx.fillText("15m Binary Prediction Market", 40, 90);
 
              if (state.userLog) {
@@ -425,8 +425,8 @@
                  // Stat Box Background
                  ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(40, 120, 720, 240);
                  
-                 // Stat Text
-                 ctx.fillStyle = "#fff"; ctx.font = "bold 30px monospace"; ctx.lineWidth = 4;
+                 // Stat Text (MODIFIED: Switched from monospace to sans-serif)
+                 ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif"; ctx.lineWidth = 4;
                  ctx.strokeText(`WIN RATE: ${rate}`, 80, 180); ctx.fillText(`WIN RATE: ${rate}`, 80, 180);
                  ctx.strokeText(`W/L:      ${wins}/${total-wins}`, 80, 230); ctx.fillText(`W/L:      ${wins}/${total-wins}`, 80, 230);
                  ctx.strokeText(`VOLUME:   ${vol}`, 80, 280); ctx.fillText(`VOLUME:   ${vol}`, 80, 280);
@@ -435,7 +435,7 @@
                  ctx.strokeText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330); ctx.fillText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330);
              }
              
-             ctx.font = "14px monospace"; ctx.fillStyle = "#ffffffaa"; ctx.lineWidth = 2;
+             ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffffffaa"; ctx.lineWidth = 2;
              ctx.strokeText("alonisthe.dev", 640, 380); ctx.fillText("alonisthe.dev", 640, 380);
              
              document.getElementById('share-preview').src = canvas.toDataURL('image/png');

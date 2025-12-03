@@ -6,7 +6,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');      
 const path = require('path');
 const { Mutex } = require('async-mutex');
-const rateLimit = require('express-rate-limit'); // NEW: Security dependency
+const rateLimit = require('express-rate-limit'); 
 
 const app = express();
 const stateMutex = new Mutex();
@@ -26,7 +26,6 @@ const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVX
 // --- ORACLE CONFIG ---
 const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
 const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-// SECURITY UPDATE: Removed hardcoded fallback key. Rely strictly on ENV.
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
 
 // --- CONFIG ---
@@ -38,12 +37,11 @@ const UPKEEP_PERCENT = 0.0048; // 0.48%
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "114.0"; // UPDATE: Rate Limiting & Input Sanitization
+const BACKEND_VERSION = "115.0"; // UPDATE: Refactored Cancellation Logic
 
 const PRIORITY_FEE_UNITS = 50000; 
 
-// --- RATE LIMITING (NEW) ---
-// Prevents spamming the verify-bet endpoint
+// --- RATE LIMITING ---
 const betLimiter = rateLimit({
 	windowMs: 1 * 60 * 1000, // 1 minute
 	max: 10, // limit each IP to 10 verification requests per minute
@@ -436,22 +434,30 @@ async function processRefunds(frameId, bets) {
     processPayoutQueue();
 }
 
-// --- SHARED CANCELLATION LOGIC ---
-async function executeFrameCancellation() {
+// --- SHARED CANCELLATION LOGIC (NEW REFACTOR) ---
+// Centralized function used by auto-cancel and admin endpoint
+async function cancelCurrentFrameAndRefund() {
     gameState.isPaused = true;
     gameState.isCancelled = true;
     
     if (gameState.bets.length > 0) {
-        console.log(`> [CANCEL] Auto/Admin Cancellation. Refunding ${gameState.bets.length} bets...`);
+        console.log(`> [CANCEL] Performing Cancellation & Refund for frame ${gameState.candleStartTime}...`);
         const betsToRefund = [...gameState.bets];
         const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
+        
+        // Add cancellation record to history
         historySummary.unshift(frameRecord);
+        if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
 
+        // Reset current frame state
         gameState.bets = [];
         gameState.poolShares = { up: 50, down: 50 };
+        
+        // Queue the actual SOL refunds
         processRefunds(gameState.candleStartTime, betsToRefund);
     }
+    // Persist the paused/cancelled state
     await saveSystemState();
 }
 
@@ -599,7 +605,8 @@ async function updatePrice() {
                 const timeRemaining = (gameState.candleStartTime + FRAME_DURATION) - Date.now();
                 if (!gameState.isCancelled && timeRemaining < 300000 && timeRemaining > 0) {
                     console.log("⚠️ Auto-cancelling due to prolonged pause...");
-                    await executeFrameCancellation();
+                    // MODIFIED: Call the new centralized cancellation logic
+                    await cancelCurrentFrameAndRefund(); 
                     return;
                 }
                 if (currentWindowStart > gameState.candleStartTime) {
@@ -653,6 +660,7 @@ async function updatePrice() {
         });
     }
 }
+
 
 setInterval(updatePrice, 10000); 
 updatePrice(); 
@@ -811,7 +819,8 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
     const release = await stateMutex.acquire();
     try {
-        await executeFrameCancellation();
+        // MODIFIED: Call the new unified cancellation function
+        await cancelCurrentFrameAndRefund();
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
     finally { release(); }
