@@ -1,4 +1,4 @@
-<!-- ASDForecast v110.0 // MASTER MERGE: GLOBAL STATS & USER TRACKING -->
+<!-- ASDForecast v110.1 // HOTFIX: REMOVED GHOST STATS ELEMENTS -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -251,7 +251,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v110.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v110.1</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -308,7 +308,7 @@
             statActUp: document.getElementById('stat-active-up'), statActDown: document.getElementById('stat-active-down'),
             statPayout: document.getElementById('stat-payout'), lastFrameStats: document.getElementById('last-frame-stats'),
             aboutContent: document.getElementById('about-content'), aboutIcon: document.getElementById('about-icon'),
-            statGlobalVol: document.getElementById('global-vol'), statGlobalFees: document.getElementById('global-fees'), statGlobalASDF: document.getElementById('global-asdf'),
+            // REMOVED: Dead IDs statGlobalVol, statGlobalFees, statGlobalASDF
             topStatus: document.getElementById('top-status-indicator'), ticker: document.getElementById('ticker-content'),
             lastUpdated: document.getElementById('last-updated'), netSharesHeader: document.getElementById('net-shares-header'),
             btnUp: document.getElementById('btn-buy-up'), btnDown: document.getElementById('btn-buy-down'),
@@ -321,7 +321,8 @@
             frameUsers: document.getElementById('frame-users'),
             globalLastPayout: document.getElementById('global-last-payout'),
             globalWinnings: document.getElementById('global-winnings'),
-            globalLifetimeUsers: document.getElementById('global-lifetime-users')
+            globalLifetimeUsers: document.getElementById('global-lifetime-users'),
+            statGlobalVol: document.getElementById('global-vol') // Keeping this but note: global-vol might be missing in updated HTML if not careful
         };
 
         if(ui.btnInc) ui.btnInc.onclick = () => adjustQty(1);
@@ -555,6 +556,9 @@
     async function poll() {
         // Prevent polling if tab hidden (redundant check for safety)
         if (document.hidden) return;
+        
+        // Safety guard: Ensure UI is initialized
+        if (!ui || !ui.price) return;
 
         try {
             let url = `${API_URL}/state`;
@@ -641,10 +645,7 @@
                 
                 // UPDATE: Fill new stats fields
                 if(data.platformStats) {
-                    // Existing fields
-                    ui.statGlobalVol.innerText = `${data.platformStats.totalVolume.toFixed(2)} SOL`;
-                    ui.statGlobalFees.innerText = `${data.platformStats.totalFees.toFixed(3)} SOL`;
-                    if(data.platformStats.totalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF).toLocaleString() + " ASDF";
+                    // Removed old references to deleted elements to prevent crash
                 }
                 
                 // New Fields
