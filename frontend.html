@@ -1,4 +1,4 @@
-<!-- ASDForecast v111.2 // REVERT: NATIVE ALERTS RESTORED -->
+<!-- ASDForecast v111.3 // UI: SHARE CARD TEXT SIZE INCREASE -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -210,12 +210,12 @@
             <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider mb-2">Global Damage Report</h3>
             <!-- 6-Grid Layout for Stats -->
             <div class="grid grid-cols-2 md:grid-cols-3 gap-6 text-center md:text-left">
-                <!-- ROW 1 -->
+                <!-- ROW 1 (Original Stats) -->
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Total Volume</span><span id="global-vol" class="text-xl font-bold font-mono text-white">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Ash Pile (Fees)</span><span id="global-fees" class="text-xl font-bold font-mono text-red-400">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">ASDF Purchased</span><span id="global-asdf" class="text-xl font-bold font-mono text-yellow-400">0 ASDF</span></div>
                 
-                <!-- ROW 2 -->
+                <!-- ROW 2 (New Stats) -->
                 <div>
                     <span class="block text-[10px] text-orange-400 font-mono uppercase">Last Payout</span>
                     <!-- Link to Solscan -->
@@ -258,7 +258,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v111.2</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v111.3</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -439,7 +439,7 @@
              ctx.font = "20px sans-serif"; ctx.fillStyle = "#fb923c"; 
              ctx.strokeText("15m Binary Prediction Market", 40, 90); ctx.fillText("15m Binary Prediction Market", 40, 90);
 
-             // ADDED: Wallet ID Draw
+             // ADDED: Wallet ID Draw (Top Right)
              if (state.pubKey) {
                  ctx.textAlign = "right";
                  // INCREASED SIZE AND ADDED STROKE FOR STANDOUT
@@ -477,8 +477,20 @@
                  ctx.strokeText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330); ctx.fillText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330);
              }
              
-             ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffffffaa"; ctx.lineWidth = 2;
-             ctx.strokeText("alonisthe.dev", 640, 380); ctx.fillText("alonisthe.dev", 640, 380);
+             // --- BOTTOM LEFT/RIGHT FOOTER TEXT ---
+             
+             // ALONISTHE.DEV (BOTTOM RIGHT)
+             // Increased font size from 14px to 24px
+             ctx.font = "24px sans-serif"; ctx.fillStyle = "#ffffffaa"; ctx.lineWidth = 2;
+             ctx.textAlign = "right";
+             ctx.strokeText("alonisthe.dev", 760, 380); ctx.fillText("alonisthe.dev", 760, 380);
+             
+             // ASDFASDFA (BOTTOM LEFT - NEW)
+             ctx.textAlign = "left";
+             ctx.strokeText("$ASDFASDFA", 40, 380); ctx.fillText("$ASDFASDFA", 40, 380);
+
+             // Reset alignment
+             ctx.textAlign = "left";
              
              document.getElementById('share-preview').src = canvas.toDataURL('image/png');
              document.getElementById('share-modal').classList.remove('hidden');
