@@ -20,8 +20,6 @@ const PORT = process.env.PORT || 3000;
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-// Pyth Mainnet SOL/USD Price Feed
-const PYTH_SOL_USD = new PublicKey("H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG");
 
 // --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
@@ -31,7 +29,7 @@ const FEE_PERCENT = 0.0552;
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "103.0"; // Helius/Pyth Oracle
+const BACKEND_VERSION = "104.0"; // Jupiter Oracle
 
 // [OPTIMIZATION] Priority Fee
 const PRIORITY_FEE_UNITS = 50000; 
@@ -112,7 +110,7 @@ function loadGlobalState() {
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState = { ...gameState, ...savedState };
-            gameState.isResetting = false; // Reset lock on boot
+            gameState.isResetting = false; 
             
             if (gameState.candleStartTime > 0) {
                 const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
@@ -135,7 +133,9 @@ async function saveSystemState() {
         isPaused: gameState.isPaused,
         isResetting: gameState.isResetting
     });
+    
     await atomicWrite(STATS_FILE, globalStats);
+
     if (gameState.candleStartTime > 0) {
         const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
         await atomicWrite(frameFile, {
@@ -219,6 +219,7 @@ async function processPayoutQueue() {
                 const tx = new Transaction();
                 const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_UNITS });
                 tx.add(priorityFeeIx);
+
                 let hasInstructions = false;
                 const validRecipients = [];
                 
@@ -245,9 +246,11 @@ async function processPayoutQueue() {
                         }));
                         hasInstructions = true;
                     }
+
                     if (hasInstructions) {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed', maxRetries: 5 });
                         console.log(`> [QUEUE] Batch Sent: ${sig}`);
+
                         if (type === 'USER_PAYOUT') {
                             for (const item of validRecipients) {
                                 const uData = await getUser(item.pubKey);
@@ -305,10 +308,11 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         for (const [pubKey, pos] of Object.entries(userPositions)) {
             const rUp = Math.round(pos.up * 10000) / 10000;
             const rDown = Math.round(pos.down * 10000) / 10000;
+            
             let userDir = "FLAT";
             if (rUp > rDown) userDir = "UP";
             else if (rDown > rUp) userDir = "DOWN";
-            else userDir = "FLAT"; 
+            if (pos.up === pos.down) userDir = "FLAT"; 
 
             if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
@@ -400,6 +404,7 @@ async function closeFrame(closePrice, closeTime) {
                 let dir = "FLAT";
                 if (rUp > rDown) dir = "UP";
                 else if (rDown > rUp) dir = "DOWN";
+                if (rUp === rDown) dir = "FLAT";
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) payoutTotal = potSol;
@@ -425,8 +430,6 @@ async function closeFrame(closePrice, closeTime) {
             userPositions[bet.user].sol += bet.costSol;
         });
 
-        // LOG WINNERS for Debug
-        const frameParticipants = [];
         const usersToUpdate = Object.entries(userPositions);
         const USER_IO_BATCH_SIZE = 20; 
         for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
@@ -437,13 +440,11 @@ async function closeFrame(closePrice, closeTime) {
                 
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
+
                 let userDir = "FLAT";
                 if (rUp > rDown) userDir = "UP";
                 else if (rDown > rUp) userDir = "DOWN";
-
-                frameParticipants.push({ 
-                    key: pubKey.slice(0, 6), shares: Math.max(rUp, rDown), sol: pos.sol, dir: userDir 
-                });
+                if (rUp === rDown) userDir = "FLAT";
 
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
@@ -456,8 +457,18 @@ async function closeFrame(closePrice, closeTime) {
             }));
         }
 
+        // LOG TOP 2
+        const frameParticipants = [];
+        for (const [pubKey, pos] of Object.entries(userPositions)) {
+             const rUp = Math.round(pos.up);
+             const rDown = Math.round(pos.down);
+             let dir = rUp > rDown ? 'UP' : (rDown > rUp ? 'DOWN' : 'FLAT');
+             frameParticipants.push({ 
+                key: pubKey.slice(0, 6), shares: Math.max(rUp, rDown), sol: pos.sol, dir: dir 
+            });
+        }
         frameParticipants.sort((a, b) => b.shares - a.shares);
-        console.log(`> [DEBUG] Frame ${frameId} Results (Top 2):`);
+        console.log(`> [DEBUG] Frame ${frameId} Results:`);
         if (frameParticipants[0]) console.log(`> 1st: ${frameParticipants[0].key} | ${frameParticipants[0].dir}`);
         if (frameParticipants[1]) console.log(`> 2nd: ${frameParticipants[1].key} | ${frameParticipants[1].dir}`);
 
@@ -479,23 +490,20 @@ async function closeFrame(closePrice, closeTime) {
 
 async function updatePrice() {
     try {
-        // ORACLE SWITCH: USE HELIUS VIA PYTH
-        const connection = new Connection(SOLANA_NETWORK);
-        const pythInfo = await connection.getAccountInfo(PYTH_SOL_USD);
+        // ORACLE SWITCH: JUPITER API V2
+        const response = await axios.get('https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112', {
+            timeout: 5000
+        });
         
-        if (pythInfo && pythInfo.data) {
-            // PARSE PYTH DATA
-            // offset 208 = price (int64), offset 20 = expo (int32)
-            const priceRaw = pythInfo.data.readBigInt64LE(208);
-            const expo = pythInfo.data.readInt32LE(20);
-            const currentPrice = Number(priceRaw) * (10 ** expo);
-
+        if (response.data && response.data.data && response.data.data['So11111111111111111111111111111111111111112']) {
+            const currentPrice = parseFloat(response.data.data['So11111111111111111111111111111111111111112'].price);
+            
             await stateMutex.runExclusive(async () => {
                 gameState.price = currentPrice;
                 const currentWindowStart = getCurrentWindowStart();
-                
-                if (gameState.isResetting) return;
 
+                if (gameState.isResetting) return;
+                
                 if (gameState.isPaused) {
                     if (currentWindowStart > gameState.candleStartTime) {
                         console.log("> [SYS] Unpausing for new Frame.");
@@ -543,7 +551,7 @@ async function updatePrice() {
                 await saveSystemState();
             });
         }
-    } catch (e) { console.log("Oracle error:", e.message); }
+    } catch (e) { console.log("Oracle unstable:", e.message); }
 }
 
 setInterval(updatePrice, 10000); 
@@ -557,9 +565,11 @@ app.get('/api/state', async (req, res) => {
     const priceChange = gameState.price - gameState.candleOpen;
     const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
     const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
+
     const totalShares = gameState.poolShares.up + gameState.poolShares.down;
     const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
     const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
+
     const nowTime = Date.now();
     const history = gameState.sharePriceHistory || [];
     const baseline = { up: 0.05, down: 0.05 };
