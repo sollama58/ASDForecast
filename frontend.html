@@ -1,4 +1,4 @@
-<!-- ASDForecast v111.3 // UI: SHARE CARD TEXT SIZE INCREASE -->
+<!-- ASDForecast v111.4 // UI: LIFETIME PAYOUTS & SHARE FONT STYLE MATCH -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -221,7 +221,8 @@
                     <!-- Link to Solscan -->
                     <a id="link-last-payout" href="https://solscan.io/account/BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy" target="_blank" class="text-xl font-bold font-mono text-white hover:text-orange-400 transition-colors underline decoration-dotted decoration-orange-900" title="Verify on Solscan">--</a>
                 </div>
-                <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Total Winnings</span><span id="global-winnings" class="text-xl font-bold font-mono text-green-400">0.00 SOL</span></div>
+                <!-- MODIFIED: Header changed from Total Winnings to Lifetime Payouts -->
+                <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Payouts</span><span id="global-winnings" class="text-xl font-bold font-mono text-green-400">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Degens</span><span id="global-lifetime-users" class="text-xl font-bold font-mono text-yellow-400">0</span></div>
             </div>
         </div>
@@ -258,7 +259,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v111.3</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v111.4</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -477,17 +478,22 @@
                  ctx.strokeText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330); ctx.fillText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330);
              }
              
-             // --- BOTTOM LEFT/RIGHT FOOTER TEXT ---
+             // --- BOTTOM LEFT/RIGHT FOOTER TEXT (UPDATED STYLE) ---
              
+             ctx.font = "bold 24px sans-serif"; // Bold font matching title style
+             ctx.lineWidth = 4; // Thick stroke
+             ctx.strokeStyle = "black";
+             ctx.fillStyle = "white";
+
              // ALONISTHE.DEV (BOTTOM RIGHT)
-             // Increased font size from 14px to 24px
-             ctx.font = "24px sans-serif"; ctx.fillStyle = "#ffffffaa"; ctx.lineWidth = 2;
              ctx.textAlign = "right";
-             ctx.strokeText("alonisthe.dev", 760, 380); ctx.fillText("alonisthe.dev", 760, 380);
+             ctx.strokeText("alonisthe.dev", 760, 380); 
+             ctx.fillText("alonisthe.dev", 760, 380);
              
-             // ASDFASDFA (BOTTOM LEFT - NEW)
+             // ASDFASDFA (BOTTOM LEFT)
              ctx.textAlign = "left";
-             ctx.strokeText("$ASDFASDFA", 40, 380); ctx.fillText("$ASDFASDFA", 40, 380);
+             ctx.strokeText("$ASDFASDFA", 40, 380); 
+             ctx.fillText("$ASDFASDFA", 40, 380);
 
              // Reset alignment
              ctx.textAlign = "left";
