@@ -1,4 +1,5 @@
-<!-- ASDForecast v104.0 // MASTER MERGE: SHARE, CONTENT, RPC, STABILITY -->
+<!-- ASDForecast v105.0 // MASTER MERGE: RATE LIMITING & VISIBILITY OPTIMIZATION -->
+<!-- SECURITY WARNING: Ensure you restrict your Helius RPC Key to your domain in the Helius Dashboard to prevent theft. -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -241,7 +242,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v104.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v105.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -261,11 +262,13 @@
 <script>
     const HOUSE_PUBKEY = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; // MAINNET WALLET
     const API_URL = 'https://asdforecast.onrender.com/api'; 
+    // SECURITY NOTE: This key is visible to the client. Restrict origin in Helius Dashboard!
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
     let PublicKey, SystemProgram, Transaction;
     let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null };
     let ui = {};
+    let pollInterval = null; // Store interval ID
 
     window.addEventListener('load', () => {
         if (window.solanaWeb3) {
@@ -314,7 +317,18 @@
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
 
-        setInterval(poll, 2000);
+        // PAGE VISIBILITY OPTIMIZATION
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            } else {
+                poll(); // Immediate update on wake
+                if (!pollInterval) pollInterval = setInterval(poll, 2000);
+            }
+        });
+
+        // Start polling initially
+        pollInterval = setInterval(poll, 2000);
         setInterval(updateTimer, 1000);
         poll();
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
@@ -508,6 +522,9 @@
     }
 
     async function poll() {
+        // Prevent polling if tab hidden (redundant check for safety)
+        if (document.hidden) return;
+
         try {
             let url = `${API_URL}/state`;
             if(state.pubKey) url += `?user=${state.pubKey.toString()}`;

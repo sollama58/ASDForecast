@@ -6,6 +6,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');      
 const path = require('path');
 const { Mutex } = require('async-mutex');
+const rateLimit = require('express-rate-limit'); // NEW: Security dependency
 
 const app = express();
 const stateMutex = new Mutex();
@@ -17,6 +18,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // --- MAINNET CONFIGURATION ---
+// SECURITY NOTE: Ensure HELIUS_API_KEY is set in your Render Environment Variables
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
@@ -24,7 +26,8 @@ const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVX
 // --- ORACLE CONFIG ---
 const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
 const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-const COINGECKO_API_KEY = "CG-KsYLbF8hxVytbPTNyLXe7vWA";
+// SECURITY UPDATE: Removed hardcoded fallback key. Rely strictly on ENV.
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
 
 // --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
@@ -35,9 +38,19 @@ const UPKEEP_PERCENT = 0.0048; // 0.48%
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "113.0"; // Server-Side Image Caching
+const BACKEND_VERSION = "114.0"; // UPDATE: Rate Limiting & Input Sanitization
 
 const PRIORITY_FEE_UNITS = 50000; 
+
+// --- RATE LIMITING (NEW) ---
+// Prevents spamming the verify-bet endpoint
+const betLimiter = rateLimit({
+	windowMs: 1 * 60 * 1000, // 1 minute
+	max: 10, // limit each IP to 10 verification requests per minute
+    message: { error: "RATE_LIMIT_EXCEEDED" },
+	standardHeaders: true,
+	legacyHeaders: false,
+});
 
 // --- PERSISTENCE ---
 const RENDER_DISK_PATH = '/var/data';
@@ -88,7 +101,6 @@ async function initShareImage() {
             console.error("> [ERR] Failed to cache share image:", e.message);
         }
     } else {
-        // Assume it's already a data URI or raw base64
         cachedShareImage = src;
     }
 }
@@ -136,7 +148,8 @@ function loadGlobalState() {
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
             const lines = fileContent.split('\n');
-            lines.slice(-2000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
+            // SCALABILITY: Limit loaded signatures to avoid memory bloat
+            lines.slice(-5000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
         }
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
@@ -561,7 +574,7 @@ async function updatePrice() {
         }
     } catch (e) { console.log(`Pyth Failed: ${e.message}`); }
 
-    if (!priceFound) {
+    if (!priceFound && COINGECKO_API_KEY) {
         try {
             const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
                 params: { ids: 'solana', vs_currencies: 'usd', x_cg_demo_api_key: COINGECKO_API_KEY },
@@ -641,22 +654,6 @@ async function updatePrice() {
     }
 }
 
-async function executeFrameCancellation() {
-    gameState.isPaused = true;
-    gameState.isCancelled = true;
-    if (gameState.bets.length > 0) {
-        console.log(`> [CANCEL] Auto/Admin Cancellation. Refunding ${gameState.bets.length} bets...`);
-        const betsToRefund = [...gameState.bets];
-        const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
-        historySummary.unshift(frameRecord);
-        await atomicWrite(HISTORY_FILE, historySummary);
-        gameState.bets = [];
-        gameState.poolShares = { up: 50, down: 50 };
-        processRefunds(gameState.candleStartTime, betsToRefund);
-    }
-    await saveSystemState();
-}
-
 setInterval(updatePrice, 10000); 
 updatePrice(); 
 processPayoutQueue();
@@ -718,13 +715,16 @@ app.get('/api/share-image', (req, res) => {
     res.json({ image: cachedShareImage });
 });
 
-app.post('/api/verify-bet', async (req, res) => {
+// Apply rate limiting to the critical bet path
+app.post('/api/verify-bet', betLimiter, async (req, res) => {
     if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
     if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
     if (gameState.isCancelled) return res.status(400).json({ error: "MARKET_CANCELLED" });
 
     const { signature, direction, userPubKey } = req.body;
     if (!signature || !userPubKey) return res.status(400).json({ error: "MISSING_DATA" });
+    
+    // Memory Cache Check
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
 
     let solAmount = 0;
@@ -744,7 +744,7 @@ app.post('/api/verify-bet', async (req, res) => {
                 }
             }
         }
-        if (solAmount === 0) return res.status(400).json({ error: "NO_FUNDS" });
+        if (solAmount <= 0) return res.status(400).json({ error: "NO_FUNDS" });
     } catch (e) { return res.status(500).json({ error: "CHAIN_ERROR" }); }
 
     const release = await stateMutex.acquire();
@@ -758,9 +758,17 @@ app.post('/api/verify-bet', async (req, res) => {
         let price = 0.05; 
         if (direction === 'UP') price = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         else price = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
+        
+        // Sanity Check: Prevent division by zero or extremely low price exploits
         if(price < 0.001) price = 0.001;
 
         const sharesReceived = solAmount / price;
+        
+        // Robustness: Ensure shares are finite numbers
+        if (!Number.isFinite(sharesReceived) || sharesReceived <= 0) {
+             return res.status(500).json({ error: "CALCULATION_ERROR" });
+        }
+
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
