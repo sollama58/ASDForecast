@@ -35,7 +35,7 @@ const UPKEEP_PERCENT = 0.0048; // 0.48%
 const RESERVE_SOL = 0.02;
 const SWEEP_TARGET = 0.05;
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "111.0"; // Double Oracle Restored
+const BACKEND_VERSION = "112.0"; // Env Var Image + Full Features
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -342,10 +342,11 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
         for (const [pubKey, pos] of Object.entries(userPositions)) {
             const rUp = Math.round(pos.up * 10000) / 10000;
             const rDown = Math.round(pos.down * 10000) / 10000;
+            
             let userDir = "FLAT";
             if (rUp > rDown) userDir = "UP";
             else if (rDown > rUp) userDir = "DOWN";
-            if (rUp === rDown) userDir = "FLAT"; 
+            if (pos.up === pos.down) userDir = "FLAT"; 
 
             if (userDir === result) {
                 const sharesHeld = result === "UP" ? pos.up : pos.down;
@@ -376,25 +377,6 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
     processPayoutQueue();
 }
 
-// --- SHARED CANCELLATION LOGIC ---
-async function executeFrameCancellation() {
-    gameState.isPaused = true;
-    gameState.isCancelled = true;
-    
-    if (gameState.bets.length > 0) {
-        console.log(`> [CANCEL] Auto/Admin Cancellation. Refunding ${gameState.bets.length} bets...`);
-        const betsToRefund = [...gameState.bets];
-        const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
-        historySummary.unshift(frameRecord);
-        await atomicWrite(HISTORY_FILE, historySummary);
-
-        gameState.bets = [];
-        gameState.poolShares = { up: 50, down: 50 };
-        processRefunds(gameState.candleStartTime, betsToRefund);
-    }
-    await saveSystemState();
-}
-
 async function processRefunds(frameId, bets) {
     if (!houseKeypair || bets.length === 0) return;
     const refunds = {};
@@ -418,6 +400,25 @@ async function processRefunds(frameId, bets) {
     const newQueue = existingQueue.concat(queue);
     await atomicWrite(QUEUE_FILE, newQueue);
     processPayoutQueue();
+}
+
+// --- SHARED CANCELLATION LOGIC ---
+async function executeFrameCancellation() {
+    gameState.isPaused = true;
+    gameState.isCancelled = true;
+    
+    if (gameState.bets.length > 0) {
+        console.log(`> [CANCEL] Auto/Admin Cancellation. Refunding ${gameState.bets.length} bets...`);
+        const betsToRefund = [...gameState.bets];
+        const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
+        historySummary.unshift(frameRecord);
+        await atomicWrite(HISTORY_FILE, historySummary);
+
+        gameState.bets = [];
+        gameState.poolShares = { up: 50, down: 50 };
+        processRefunds(gameState.candleStartTime, betsToRefund);
+    }
+    await saveSystemState();
 }
 
 async function closeFrame(closePrice, closeTime) {
@@ -509,6 +510,22 @@ async function closeFrame(closePrice, closeTime) {
             }));
         }
 
+        // DEBUG: LOG TOP 2
+        const frameParticipants = [];
+        for (const [pubKey, pos] of Object.entries(userPositions)) {
+             const rUp = Math.round(pos.up);
+             const rDown = Math.round(pos.down);
+             let dir = rUp > rDown ? 'UP' : (rDown > rUp ? 'DOWN' : 'FLAT');
+             if (rUp === rDown) dir = 'FLAT'; // Explicit
+             frameParticipants.push({ 
+                key: pubKey.slice(0, 6), shares: Math.max(rUp, rDown), sol: pos.sol, dir: dir 
+            });
+        }
+        frameParticipants.sort((a, b) => b.shares - a.shares);
+        console.log(`> [DEBUG] Frame ${frameId} Results (Top 2):`);
+        if (frameParticipants[0]) console.log(`> 1st: ${frameParticipants[0].key} | ${frameParticipants[0].dir}`);
+        if (frameParticipants[1]) console.log(`> 2nd: ${frameParticipants[1].key} | ${frameParticipants[1].dir}`);
+
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
@@ -557,7 +574,6 @@ async function updatePrice() {
         await stateMutex.runExclusive(async () => {
             gameState.price = fetchedPrice;
             gameState.lastPriceTimestamp = Date.now();
-            
             const currentWindowStart = getCurrentWindowStart();
 
             if (gameState.isResetting) return;
@@ -575,7 +591,6 @@ async function updatePrice() {
                 if (currentWindowStart > gameState.candleStartTime) {
                     console.log("> [SYS] Unpausing for new Frame.");
                     
-                    // If it wasn't cancelled, log it as PAUSED
                     if (!gameState.isCancelled) {
                          const skippedFrameRecord = {
                             id: gameState.candleStartTime,
@@ -592,7 +607,6 @@ async function updatePrice() {
                         await atomicWrite(HISTORY_FILE, historySummary);
                         gameState.isPaused = false; 
                     } else {
-                        // If cancelled, just reset flags for new frame
                         gameState.isCancelled = false;
                         gameState.isPaused = false;
                     }
@@ -676,7 +690,8 @@ app.get('/api/state', async (req, res) => {
         market: { priceUp, priceDown, sharesUp: gameState.poolShares.up, sharesDown: gameState.poolShares.down, changes: changes },
         history: historySummary, recentTrades: gameState.recentTrades, userStats: myStats, activePosition: activePosition,
         leaderboard: globalLeaderboard, lastPriceTimestamp: gameState.lastPriceTimestamp,
-        backendVersion: BACKEND_VERSION
+        backendVersion: BACKEND_VERSION,
+        baseImageSrc: process.env.BASE_IMAGE_SRC // Pass Env Var
     });
 });
 
