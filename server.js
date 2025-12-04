@@ -37,7 +37,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; // 0.48%
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "120.0"; // UPDATE: Status Images Support
+const BACKEND_VERSION = "120.1"; // UPDATE: Failsafe for stuck RESETTING state
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -547,9 +547,10 @@ async function closeFrame(closePrice, closeTime) {
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
                 let dir = "FLAT";
-                if (rUp > rDown) dir = "UP";
-                else if (rDown > rUp) dir = "DOWN";
-                if (rUp === rDown) dir = "FLAT";
+                if (rUp > rDown) userDir = "UP";
+                else if (rDown > rUp) userDir = "DOWN";
+                if (rUp === rDown) userDir = "FLAT";
+
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) {
@@ -646,6 +647,35 @@ async function updatePrice() {
             gameState.price = fetchedPrice;
             gameState.lastPriceTimestamp = Date.now();
             const currentWindowStart = getCurrentWindowStart();
+
+            // RECOVERY MECHANISM FOR STUCK RESETTING STATE (NEW)
+            if (gameState.isResetting && currentWindowStart > gameState.candleStartTime) {
+                 console.log("⚠️ [RECOVER] Detected stuck RESETTING state. Forcing next frame start.");
+                 gameState.isResetting = false; 
+                 // Ensure the current (stuck) frame is skipped in history (as PAUSED state)
+                 const skippedFrameRecord = {
+                    id: gameState.candleStartTime,
+                    startTime: gameState.candleStartTime,
+                    endTime: gameState.candleStartTime + FRAME_DURATION,
+                    time: new Date(gameState.candleStartTime).toISOString(),
+                    open: gameState.candleOpen,
+                    close: fetchedPrice,
+                    result: "PAUSED", 
+                    sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
+                };
+                historySummary.unshift(skippedFrameRecord);
+                if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
+                await atomicWrite(HISTORY_FILE, historySummary);
+                 
+                 gameState.candleStartTime = currentWindowStart;
+                 gameState.candleOpen = fetchedPrice;
+                 gameState.poolShares = { up: 50, down: 50 }; 
+                 gameState.bets = []; 
+                 gameState.sharePriceHistory = [];
+                 await saveSystemState();
+                 updatePublicStateCache();
+                 return;
+            }
 
             if (gameState.isResetting) return;
             

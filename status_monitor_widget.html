@@ -1,922 +1,288 @@
-const express = require('express');
-const cors = require('cors');
-const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction, ComputeBudgetProgram } = require('@solana/web3.js');
-const axios = require('axios');
-const fs = require('fs').promises; 
-const fsSync = require('fs');      
-const path = require('path');
-const { Mutex } = require('async-mutex');
-const rateLimit = require('express-rate-limit'); 
+<!-- ASDForecast Status Monitor v1.2 // REVISED PRICE/TIMER LAYOUT -->
 
-const app = express();
-const stateMutex = new Mutex();
-const payoutMutex = new Mutex();
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 
-// Enable trust proxy if behind a load balancer (like Render) to get real IPs for rate limiting
-app.set('trust proxy', 1);
-
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
-app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
-
-// --- MAINNET CONFIGURATION ---
-const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
-const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-
-// --- ORACLE CONFIG ---
-const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
-const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
-
-// --- CONFIG ---
-const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
-const PRICE_SCALE = 0.1;
-const PAYOUT_MULTIPLIER = 0.94;
-const FEE_PERCENT = 0.0552; 
-const UPKEEP_PERCENT = 0.0048; // 0.48%
-const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "120.0"; // UPDATE: Status Images Support
-
-const PRIORITY_FEE_UNITS = 50000; 
-
-// --- SECURITY & VALIDATION ---
-const SOLANA_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const SIGNATURE_REGEX = /^[1-9A-HJ-NP-Za-km-z]{80,100}$/;
-
-function isValidSolanaAddress(address) {
-    return typeof address === 'string' && SOLANA_ADDRESS_REGEX.test(address);
-}
-
-function isValidSignature(signature) {
-    return typeof signature === 'string' && SIGNATURE_REGEX.test(signature);
-}
-
-// --- RATE LIMITING ---
-const betLimiter = rateLimit({
-	windowMs: 1 * 60 * 1000, 
-	max: 10, 
-    message: { error: "RATE_LIMIT_EXCEEDED" },
-	standardHeaders: true,
-	legacyHeaders: false,
-});
-
-const stateLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, 
-    max: 120, 
-    message: { error: "POLLING_LIMIT_EXCEEDED" },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
-
-// --- PERSISTENCE ---
-const RENDER_DISK_PATH = '/var/data';
-const DATA_DIR = fsSync.existsSync(RENDER_DISK_PATH) ? RENDER_DISK_PATH : path.join(__dirname, 'data');
-const FRAMES_DIR = path.join(DATA_DIR, 'frames');
-const USERS_DIR = path.join(DATA_DIR, 'users');
-
-if (!fsSync.existsSync(DATA_DIR)) fsSync.mkdirSync(DATA_DIR);
-if (!fsSync.existsSync(FRAMES_DIR)) fsSync.mkdirSync(FRAMES_DIR);
-if (!fsSync.existsSync(USERS_DIR)) fsSync.mkdirSync(USERS_DIR);
-
-const STATE_FILE = path.join(DATA_DIR, 'state.json');
-const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
-const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
-const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); 
-const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json'); 
-
-console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
-if (!process.env.HELIUS_API_KEY) console.warn("⚠️ [WARN] HELIUS_API_KEY is missing! RPC calls may fail.");
-
-async function atomicWrite(filePath, data) {
-    const tempPath = `${filePath}.tmp`;
-    try {
-        await fs.writeFile(tempPath, JSON.stringify(data));
-        await fs.rename(tempPath, filePath); 
-    } catch (e) {
-        console.error(`> [IO] Write Error on ${filePath}:`, e.message);
+<style>
+    /* THEME: Terminal / Fire */
+    body {
+        font-family: 'Comic Neue', cursive; 
+        background-color: #0c0c0c; 
+        color: #ffedd5;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
-}
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
 
-// --- IMAGE CACHING ---
-let cachedShareImage = null;
-let cachedItsFineImage = null;
-let cachedItsOverImage = null;
-
-async function cacheImage(url) {
-    if (!url) return null;
-    if (url.startsWith('http')) {
-        try {
-            const response = await axios.get(url, { responseType: 'arraybuffer' });
-            const buffer = Buffer.from(response.data, 'binary');
-            const type = response.headers['content-type'];
-            return `data:${type};base64,${buffer.toString('base64')}`;
-        } catch (e) { 
-            console.error(`> [ERR] Failed to cache image: ${url}`, e.message);
-            return null;
-        }
+    .monitor-container {
+        width: 100%;
+        max-width: 800px;
+        padding: 20px;
     }
-    return url;
-}
 
-async function initImages() {
-    console.log("> [SYS] Caching Images...");
-    cachedShareImage = await cacheImage(process.env.BASE_IMAGE_SRC);
-    cachedItsFineImage = await cacheImage(process.env.ITSFINE_IMG_SRC);
-    cachedItsOverImage = await cacheImage(process.env.ITSOVER_IMG_SRC);
-    console.log("> [SYS] Images Cached.");
-}
-initImages();
-
-let houseKeypair;
-try {
-    if (process.env.SOLANA_WALLET_JSON) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
-    } else if (fsSync.existsSync('house-wallet.json')) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
+    .panel {
+        background: rgba(20, 10, 5, 0.8);
+        border: 2px solid #ea580c;
+        border-radius: 8px;
+        box-shadow: 4px 4px 0 #9a3412;
+        margin-bottom: 20px;
     }
-} catch (e) { console.error("> [ERR] Wallet Load Failed:", e.message); }
 
-// --- STATE ---
-let gameState = {
-    price: 0,
-    lastPriceTimestamp: 0, 
-    candleOpen: 0,
-    candleStartTime: 0,
-    poolShares: { up: 50, down: 50 },
-    bets: [],
-    recentTrades: [],
-    sharePriceHistory: [],
-    isPaused: false,
-    isResetting: false,
-    isCancelled: false
-};
-let historySummary = [];
-let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, totalWinnings: 0, totalLifetimeUsers: 0, lastASDFSignature: null };
-let processedSignatures = new Set(); 
-let globalLeaderboard = [];
-let knownUsers = new Set(); 
-let currentQueueLength = 0; 
+    .bar-container { height: 24px; background: #2a1005; border-radius: 12px; overflow: hidden; border: 1px solid #7c2d12; display: flex; }
+    .bar-fill { height: 100%; transition: width 0.5s ease; }
+    .bg-up { background: #22c55e; }
+    .bg-down { background: #ef4444; }
 
-// --- STATE CACHING ---
-let cachedPublicState = null;
+    /* Status Indicator Pulse */
+    .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
+    .status-online { background-color: #4ade80; box-shadow: 0 0 8px #4ade80; }
+    .status-offline { background-color: #ef4444; }
+</style>
 
-function loadGlobalState() {
-    try {
-        if (fsSync.existsSync(HISTORY_FILE)) historySummary = JSON.parse(fsSync.readFileSync(HISTORY_FILE));
-        if (fsSync.existsSync(STATS_FILE)) {
-            const loaded = JSON.parse(fsSync.readFileSync(STATS_FILE));
-            globalStats = { ...globalStats, ...loaded };
-            if(!globalStats.totalWinnings) globalStats.totalWinnings = 0;
-            if(!globalStats.totalLifetimeUsers) globalStats.totalLifetimeUsers = 0;
-        }
-        if (fsSync.existsSync(SIGS_FILE)) {
-            const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
-            const lines = fileContent.split('\n');
-            lines.slice(-5000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
-        }
-        if (fsSync.existsSync(STATE_FILE)) {
-            const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
-            gameState = { ...gameState, ...savedState };
-            gameState.isResetting = false; 
+<div class="monitor-container">
+    
+    <div class="flex justify-between items-center mb-6 border-b border-orange-900/50 pb-4">
+        <h1 class="text-2xl font-bold text-orange-500">ASDForecast // MONITOR</h1>
+        <div class="text-xs font-mono text-gray-500 flex items-center">
+            <span id="status-dot" class="status-dot status-offline"></span>
+            <span id="connection-status">CONNECTING...</span>
+        </div>
+    </div>
+
+    <!-- PRICE & TIME PANEL -->
+    <div class="panel p-6">
+        <div class="flex flex-col gap-4">
             
-            if (gameState.candleStartTime > 0) {
-                const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
-                if (fsSync.existsSync(currentFrameFile)) {
-                    const frameData = JSON.parse(fsSync.readFileSync(currentFrameFile));
-                    gameState.bets = frameData.bets || [];
-                }
-            }
-        }
+            <!-- ROW 1: PRICE DATA -->
+            <div>
+                <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider">SOL/USD (15m Change)</h3>
+                <div class="flex items-baseline gap-3 mt-1">
+                    <span id="price" class="text-6xl font-mono font-bold text-white">$---.--</span>
+                    <span id="change" class="text-3xl font-mono font-bold text-gray-500">--</span>
+                </div>
+            </div>
+
+            <!-- ROW 2: TIME REMAINING (MOVED HERE) -->
+            <div>
+                <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider mb-1">Time Remaining</h3>
+                <div id="timer" class="text-5xl font-mono font-bold text-yellow-400">--:--</div>
+            </div>
+
+            <!-- ROW 3: FRAME TIMES -->
+            <div class="text-xs font-mono text-orange-500/70 flex gap-4 border-t border-orange-900/50 pt-2 mt-2">
+                <span>OPEN: <span id="frame-start" class="text-white">--:--</span></span>
+                <span>CLOSE: <span id="frame-end" class="text-white">--:--</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- SENTIMENT PANEL -->
+    <div class="panel p-6 bg-black/20 relative">
+        <div class="flex justify-between items-end mb-2">
+            <h3 class="text-lg font-bold text-white">Net Shares Bought</h3>
+            <div class="text-xs text-orange-500/70 font-mono">Active Wallets: <span id="active-users" class="text-white font-bold">0</span></div>
+        </div>
+
+        <div class="flex justify-between text-sm font-bold font-mono text-white mb-1">
+            <span class="text-green-400">UP: <span id="lbl-shares-up">0</span></span>
+            <span class="text-red-400">DOWN: <span id="lbl-shares-down">0</span></span>
+        </div>
         
-        const userFiles = fsSync.readdirSync(USERS_DIR);
-        userFiles.forEach(f => {
-            if(f.startsWith('user_') && f.endsWith('.json')) {
-                knownUsers.add(f.replace('user_','').replace('.json',''));
+        <div class="bar-container mb-4">
+            <div id="bar-up" class="bar-fill bg-up" style="width: 50%"></div>
+            <div id="bar-down" class="bar-fill bg-down" style="width: 50%"></div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 text-center text-xs font-mono text-orange-500/80">
+            <div>
+                <div class="text-sm font-bold text-white">Price: <span id="lbl-price-up">0.050</span> SOL</div>
+                <div class="flex justify-center gap-2 mt-1 text-[10px] opacity-70">
+                    <span>1m: <span id="up-1m">0%</span></span>
+                    <span>5m: <span id="up-5m">0%</span></span>
+                </div>
+            </div>
+            <div>
+                <div class="text-sm font-bold text-white">Price: <span id="lbl-price-down">0.050</span> SOL</div>
+                <div class="flex justify-center gap-2 mt-1 text-[10px] opacity-70">
+                    <span>1m: <span id="down-1m">0%</span></span>
+                    <span>5m: <span id="down-5m">0%</span></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-6 flex justify-center items-center gap-3">
+            <div class="bg-black/40 border border-orange-900/30 rounded px-6 py-2 text-center shadow-inner">
+                <span class="text-[10px] text-orange-400 uppercase block tracking-widest opacity-70 mb-1">Current Frame Pot</span>
+                <span id="current-pot" class="text-2xl font-mono font-bold text-white">0.000 SOL</span>
+            </div>
+            <div class="text-sm text-orange-500/70 font-mono" id="frame-users-container">
+                (👤 <span id="frame-users">0</span>)
+            </div>
+        </div>
+    </div>
+
+    <div class="text-center text-[10px] text-gray-600 font-mono mt-4">
+        Backend: <span id="backend-version">v---</span> | Status Monitor v1.2
+    </div>
+
+</div>
+
+<script>
+    const API_URL = 'https://asdforecast.onrender.com/api';
+    
+    let state = { prices: { up: 0.05, down: 0.05 }, targetEndTime: null, isResetting: false };
+    let ui = {};
+    let pollTimeout = null;
+
+    window.addEventListener('load', () => {
+        ui = {
+            price: document.getElementById('price'), 
+            change: document.getElementById('change'), 
+            timer: document.getElementById('timer'),
+            frameStart: document.getElementById('frame-start'), 
+            frameEnd: document.getElementById('frame-end'),
+            barUp: document.getElementById('bar-up'), 
+            barDown: document.getElementById('bar-down'),
+            lblSharesUp: document.getElementById('lbl-shares-up'), 
+            lblSharesDown: document.getElementById('lbl-shares-down'),
+            lblPriceUp: document.getElementById('lbl-price-up'), 
+            lblPriceDown: document.getElementById('lbl-price-down'),
+            up1m: document.getElementById('up-1m'), 
+            up5m: document.getElementById('up-5m'), 
+            down1m: document.getElementById('down-1m'), 
+            down5m: document.getElementById('down-5m'),
+            currentPot: document.getElementById('current-pot'),
+            activeUsers: document.getElementById('active-users'),
+            backendVersion: document.getElementById('backend-version'),
+            statusDot: document.getElementById('status-dot'),
+            connStatus: document.getElementById('connection-status'),
+            frameUsers: document.getElementById('frame-users')
+        };
+
+        // Page Visibility Optimization
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (pollTimeout) { clearTimeout(pollTimeout); pollTimeout = null; }
+            } else {
+                poll(); 
             }
         });
-        globalStats.totalLifetimeUsers = knownUsers.size; 
-        
-        let recalculatedWinnings = 0;
-        if (historySummary.length > 0) {
-            recalculatedWinnings = historySummary.reduce((sum, frame) => sum + (frame.payout || 0), 0);
-        }
-        globalStats.totalWinnings = recalculatedWinnings;
-        
-        console.log(`> [SYS] Registry loaded. ${knownUsers.size} lifetime users. Total Winnings Recalculated: ${recalculatedWinnings.toFixed(2)} SOL`);
 
-    } catch (e) { console.error("> [ERR] Load Error:", e); }
-}
-
-async function saveSystemState() {
-    await atomicWrite(STATE_FILE, {
-        candleOpen: gameState.candleOpen,
-        candleStartTime: gameState.candleStartTime,
-        poolShares: gameState.poolShares,
-        recentTrades: gameState.recentTrades,
-        sharePriceHistory: gameState.sharePriceHistory,
-        isPaused: gameState.isPaused,
-        isResetting: gameState.isResetting,
-        isCancelled: gameState.isCancelled,
-        lastPriceTimestamp: gameState.lastPriceTimestamp
+        // Start Loop
+        poll();
+        setInterval(updateTimer, 1000);
     });
-    await atomicWrite(STATS_FILE, globalStats);
 
-    if (gameState.candleStartTime > 0) {
-        const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
-        const status = gameState.isCancelled ? 'CANCELLED' : (gameState.isPaused ? 'PAUSED' : (gameState.isResetting ? 'RESETTING' : 'ACTIVE'));
-        await atomicWrite(frameFile, {
-            id: gameState.candleStartTime,
-            startTime: gameState.candleStartTime,
-            endTime: gameState.candleStartTime + FRAME_DURATION,
-            open: gameState.candleOpen,
-            poolShares: gameState.poolShares,
-            bets: [...gameState.bets],
-            status: status
-        });
-    }
-}
-
-async function getUser(pubKey) {
-    if (!isValidSolanaAddress(pubKey)) {
-        return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
-    }
-
-    const file = path.join(USERS_DIR, `user_${pubKey}.json`);
-    try {
-        const data = await fs.readFile(file, 'utf8');
-        return JSON.parse(data);
-    } catch (e) {
-        return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
-    }
-}
-
-async function saveUser(pubKey, data) {
-    if (!isValidSolanaAddress(pubKey)) return;
-    try {
-        const file = path.join(USERS_DIR, `user_${pubKey}.json`);
-        await atomicWrite(file, data);
-    } catch (e) {}
-}
-
-loadGlobalState();
-
-async function updateASDFPurchases() {
-    const connection = new Connection(SOLANA_NETWORK); 
-    try {
-        const options = { limit: 20 };
-        if (globalStats.lastASDFSignature) options.until = globalStats.lastASDFSignature;
-        const signaturesDetails = await connection.getSignaturesForAddress(FEE_WALLET, options);
-        if (signaturesDetails.length === 0) return;
-        globalStats.lastASDFSignature = signaturesDetails[0].signature;
-        const txs = await connection.getParsedTransactions(signaturesDetails.map(s => s.signature), { maxSupportedTransactionVersion: 0 });
-        let newPurchasedAmount = 0;
-        for (const tx of txs) {
-            if (!tx || !tx.meta) continue;
-            const preBal = tx.meta.preTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
-            const postBal = tx.meta.postTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
-            const preAmount = preBal?.uiTokenAmount.uiAmount || 0;
-            const postAmount = postBal?.uiTokenAmount.uiAmount || 0;
-            if (postAmount > preAmount) newPurchasedAmount += (postAmount - preAmount);
+    function updateTimer() {
+        if (state.isResetting) { 
+            ui.timer.innerText = "RESET"; 
+            ui.timer.className = "text-5xl font-mono font-bold text-blue-400 animate-pulse mt-1";
+            return; 
         }
-        if (newPurchasedAmount > 0) globalStats.totalASDF += newPurchasedAmount;
-    } catch (e) { console.error("> [ASDF] History Check Failed:", e.message); }
-}
-
-async function updateLeaderboard() {
-    try {
-        const files = await fs.readdir(USERS_DIR);
-        const leaders = [];
-        for (const file of files) {
-            if (!file.endsWith('.json')) continue;
-            try {
-                const raw = await fs.readFile(path.join(USERS_DIR, file), 'utf8');
-                const data = JSON.parse(raw);
-                let totalWon = 0;
-                if (data.frameLog) {
-                    Object.values(data.frameLog).forEach(log => { if (log.payoutAmount) totalWon += log.payoutAmount; });
-                }
-                const totalGames = data.wins + data.losses;
-                if (totalGames > 0) {
-                     leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
-                }
-            } catch(e) {}
+        
+        // Local Lockdown check
+        if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { 
+            ui.timer.innerText = "00:00"; 
+            return; 
         }
-        leaders.sort((a, b) => b.totalWon - a.totalWon);
-        globalLeaderboard = leaders.slice(0, 5); 
-    } catch (e) { console.error("Leaderboard Error:", e.message); }
-}
-setInterval(updateLeaderboard, 60000); 
-updateLeaderboard(); 
 
-function getCurrentWindowStart() {
-    const now = new Date();
-    const minutes = Math.floor(now.getMinutes() / 15) * 15;
-    const start = new Date(now);
-    start.setMinutes(minutes, 0, 0, 0);
-    return start.getTime();
-}
-
-async function processPayoutQueue() {
-    const release = await payoutMutex.acquire();
-    try {
-        if (!houseKeypair || !fsSync.existsSync(QUEUE_FILE)) {
-            currentQueueLength = 0;
+        if (!state.targetEndTime) {
+            ui.timer.innerText = "--:--";
             return;
         }
-        let queueData = [];
-        try { queueData = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) { queueData = []; }
+
+        ui.timer.className = "text-5xl font-mono font-bold text-yellow-400"; // Removed mt-1
+        const now = Date.now();
+        let diff = state.targetEndTime - now;
+        if (diff < 0) diff = 0;
         
-        currentQueueLength = queueData.length;
-        if (!queueData || queueData.length === 0) return;
-
-        console.log(`> [QUEUE] Processing ${queueData.length} batches...`);
-        const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-        
-        while (queueData.length > 0) {
-            const batch = queueData[0];
-            const { type, recipients, frameId } = batch;
-            try {
-                const tx = new Transaction();
-                const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_UNITS });
-                tx.add(priorityFeeIx);
-                let hasInstructions = false;
-                const validRecipients = [];
-                
-                if (type === 'USER_PAYOUT' || type === 'USER_REFUND') {
-                    for (const item of recipients) {
-                        const uData = await getUser(item.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId]) {
-                            const entry = uData.frameLog[frameId];
-                            if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
-                            if (type === 'USER_REFUND' && entry.refundTx) continue;
-                        }
-                        validRecipients.push(item);
-                    }
-                } else {
-                     recipients.forEach(r => validRecipients.push(r));
-                }
-
-                if (validRecipients.length > 0) {
-                    for (const item of validRecipients) {
-                        tx.add(SystemProgram.transfer({
-                            fromPubkey: houseKeypair.publicKey,
-                            toPubkey: new PublicKey(item.pubKey),
-                            lamports: item.amount
-                        }));
-                        hasInstructions = true;
-                    }
-
-                    if (hasInstructions) {
-                        const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed', maxRetries: 5 });
-                        console.log(`> [QUEUE] Batch Sent: ${sig}`);
-
-                        if (type === 'USER_PAYOUT') {
-                            for (const item of validRecipients) {
-                                const uData = await getUser(item.pubKey);
-                                if (uData.frameLog && uData.frameLog[frameId]) {
-                                    uData.frameLog[frameId].payoutTx = sig;
-                                    uData.frameLog[frameId].payoutAmount = item.amount / 1e9;
-                                    await saveUser(item.pubKey, uData);
-                                }
-                            }
-                        } else if (type === 'USER_REFUND') {
-                            for (const item of validRecipients) {
-                                const uData = await getUser(item.pubKey);
-                                if (!uData.frameLog[frameId]) uData.frameLog[frameId] = { result: 'CANCELLED', time: Date.now() };
-                                uData.frameLog[frameId].refundTx = sig;
-                                await saveUser(item.pubKey, uData);
-                            }
-                        }
-                    }
-                }
-            } catch (e) { console.error(`> [QUEUE] Batch Failed: ${e.message}`); }
-            queueData.shift();
-            await atomicWrite(QUEUE_FILE, queueData);
-            currentQueueLength = queueData.length;
-        }
-    } catch (e) { console.error("> [QUEUE] Error:", e); }
-    finally { release(); }
-}
-
-async function queuePayouts(frameId, result, bets, totalVolume) {
-    if (totalVolume === 0) return;
-    const queue = []; 
-
-    if (result === "FLAT") {
-        const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
-        if (burnLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: burnLamports }] });
-    } else {
-        const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9); 
-        const upkeepLamports = Math.floor((totalVolume * UPKEEP_PERCENT) * 1e9); 
-        
-        if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }] });
-        if (upkeepLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: UPKEEP_WALLET.toString(), amount: upkeepLamports }] });
+        const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const s = Math.floor((diff % (1000 * 60)) / 1000);
+        ui.timer.innerText = `${m}:${s.toString().padStart(2, '0')}`;
     }
 
-    if (result !== "FLAT") {
-        const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
-        const userPositions = {};
-        bets.forEach(bet => {
-            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
-            if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-            else userPositions[bet.user].down += bet.shares;
-        });
-
-        let totalWinningShares = 0;
-        const eligibleWinners = [];
-
-        for (const [pubKey, pos] of Object.entries(userPositions)) {
-            const rUp = Math.round(pos.up * 10000) / 10000;
-            const rDown = Math.round(pos.down * 10000) / 10000;
-            let userDir = "FLAT";
-            if (rUp > rDown) userDir = "UP";
-            else if (rDown > rUp) userDir = "DOWN";
-            if (pos.up === pos.down) userDir = "FLAT"; 
-
-            if (userDir === result) {
-                const sharesHeld = result === "UP" ? pos.up : pos.down;
-                totalWinningShares += sharesHeld;
-                eligibleWinners.push({ pubKey, sharesHeld });
-            }
-        }
-
-        if (totalWinningShares > 0) {
-            const BATCH_SIZE = 12; 
-            for (let i = 0; i < eligibleWinners.length; i += BATCH_SIZE) {
-                const batchWinners = eligibleWinners.slice(i, i + BATCH_SIZE);
-                const batchRecipients = [];
-                for (const winner of batchWinners) {
-                    const shareRatio = winner.sharesHeld / totalWinningShares;
-                    const payoutLamports = Math.floor(potLamports * shareRatio);
-                    if (payoutLamports > 5000) batchRecipients.push({ pubKey: winner.pubKey, amount: payoutLamports });
-                }
-                if (batchRecipients.length > 0) queue.push({ type: 'USER_PAYOUT', frameId: frameId, recipients: batchRecipients });
-            }
-        }
+    function formatChange(el, val) { 
+        if (!val) val = 0; 
+        const sign = val >= 0 ? '+' : ''; 
+        const color = val > 0 ? 'text-green-400' : (val < 0 ? 'text-red-400' : 'text-gray-500'); 
+        el.innerHTML = `<span class="${color}">${sign}${val.toFixed(2)}%</span>`; 
     }
 
-    let existingQueue = [];
-    try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
-    const newQueue = existingQueue.concat(queue);
-    await atomicWrite(QUEUE_FILE, newQueue);
-    currentQueueLength = newQueue.length;
-    processPayoutQueue();
-}
+    async function poll() {
+        if (document.hidden) return;
 
-async function processRefunds(frameId, bets) {
-    if (!houseKeypair || bets.length === 0) return;
-    const refunds = {};
-    let totalFee = 0;
-    bets.forEach(bet => {
-        if (!refunds[bet.user]) refunds[bet.user] = 0;
-        const refundAmt = Math.floor(bet.costSol * 0.99 * 1e9);
-        refunds[bet.user] += refundAmt;
-        totalFee += (bet.costSol * 0.01 * 1e9);
-    });
-    const queue = [];
-    if (totalFee > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: Math.floor(totalFee) }] });
-    const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: amt }));
-    const BATCH_SIZE = 12;
-    for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-        const batch = recipients.slice(i, i + BATCH_SIZE);
-        queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch }); 
-    }
-    let existingQueue = [];
-    try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
-    const newQueue = existingQueue.concat(queue);
-    await atomicWrite(QUEUE_FILE, newQueue);
-    currentQueueLength = newQueue.length;
-    processPayoutQueue();
-}
-
-async function cancelCurrentFrameAndRefund() {
-    gameState.isPaused = true;
-    gameState.isCancelled = true;
-    
-    if (gameState.bets.length > 0) {
-        console.log(`> [CANCEL] Performing Cancellation & Refund for frame ${gameState.candleStartTime}...`);
-        const betsToRefund = [...gameState.bets];
-        const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
-        
-        historySummary.unshift(frameRecord);
-        if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
-        await atomicWrite(HISTORY_FILE, historySummary);
-
-        gameState.bets = [];
-        gameState.poolShares = { up: 50, down: 50 };
-        
-        processRefunds(gameState.candleStartTime, betsToRefund);
-    }
-    await saveSystemState();
-}
-
-
-async function closeFrame(closePrice, closeTime) {
-    const release = await stateMutex.acquire(); 
-    try {
-        const frameId = gameState.candleStartTime; 
-        console.log(`> [SYS] Closing Frame: ${frameId}`);
-
-        await updateASDFPurchases();
-
-        const openPrice = gameState.candleOpen;
-        let result = "FLAT";
-        if (closePrice > openPrice) result = "UP";
-        else if (closePrice < openPrice) result = "DOWN";
-
-        const realSharesUp = Math.max(0, gameState.poolShares.up - 50);
-        const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
-        const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
-
-        let frameFees = (result === "FLAT") ? frameSol * 0.99 : frameSol * FEE_PERCENT;
-        globalStats.totalFees += frameFees;
-
-        let winnerCount = 0;
-        let payoutTotal = 0;
-        if (result !== "FLAT") {
-            const potSol = frameSol * 0.94;
-            const userPositions = {};
-            gameState.bets.forEach(bet => {
-                if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
-                if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-                else userPositions[bet.user].down += bet.shares;
-            });
-            for (const [pk, pos] of Object.entries(userPositions)) {
-                const rUp = Math.round(pos.up * 10000) / 10000;
-                const rDown = Math.round(pos.down * 10000) / 10000;
-                let dir = "FLAT";
-                if (rUp > rDown) dir = "UP";
-                else if (rDown > rUp) dir = "DOWN";
-                if (rUp === rDown) dir = "FLAT";
-                if (dir === result) winnerCount++;
-            }
-            if (winnerCount > 0) {
-                payoutTotal = potSol;
-                globalStats.totalWinnings += payoutTotal; 
-            }
-        }
-
-        const frameRecord = {
-            id: frameId, startTime: frameId, endTime: frameId + FRAME_DURATION,
-            time: new Date(frameId).toISOString(), open: openPrice, close: closePrice,
-            result: result, sharesUp: realSharesUp, sharesDown: realSharesDown,
-            totalSol: frameSol, winners: winnerCount, payout: payoutTotal
-        };
-        
-        historySummary.unshift(frameRecord);
-        if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
-        await atomicWrite(HISTORY_FILE, historySummary);
-
-        const betsSnapshot = [...gameState.bets];
-        const userPositions = {};
-        betsSnapshot.forEach(bet => {
-            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
-            if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-            else userPositions[bet.user].down += bet.shares;
-            userPositions[bet.user].sol += bet.costSol;
-        });
-
-        const usersToUpdate = Object.entries(userPositions);
-        const USER_IO_BATCH_SIZE = 20; 
-        for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
-            const batch = usersToUpdate.slice(i, i + USER_IO_BATCH_SIZE);
-            await Promise.all(batch.map(async ([pubKey, pos]) => {
-                const userData = await getUser(pubKey);
-                userData.framesPlayed += 1;
-                
-                const rUp = Math.round(pos.up * 10000) / 10000;
-                const rDown = Math.round(pos.down * 10000) / 10000;
-
-                let userDir = "FLAT";
-                if (rUp > rDown) userDir = "UP";
-                else if (rDown > rUp) userDir = "DOWN";
-                if (rUp === rDown) userDir = "FLAT";
-
-                const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
-                if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
-                if (!userData.frameLog) userData.frameLog = {};
-                userData.frameLog[frameId] = { 
-                    dir: userDir, result: outcome, time: Date.now(),
-                    upShares: pos.up, downShares: pos.down, wagered: pos.sol
-                };
-                await saveUser(pubKey, userData);
-            }));
-        }
-
-        processedSignatures.clear();
-        await fs.writeFile(SIGS_FILE, '');
-
-        updatePublicStateCache();
-
-        await saveSystemState();
-        
-    } finally { release(); }
-}
-
-async function updatePrice() {
-    let fetchedPrice = 0;
-    let priceFound = false;
-
-    try {
-        const response = await axios.get(`${PYTH_HERMES_URL}?ids[]=${SOL_FEED_ID}`, { timeout: 2000 });
-        if (response.data && response.data.parsed && response.data.parsed[0]) {
-            const p = response.data.parsed[0].price;
-            fetchedPrice = Number(p.price) * Math.pow(10, p.expo);
-            priceFound = true;
-        }
-    } catch (e) { console.log(`Pyth Failed: ${e.message}`); }
-
-    if (!priceFound && COINGECKO_API_KEY) {
         try {
-            const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-                params: { ids: 'solana', vs_currencies: 'usd', x_cg_demo_api_key: COINGECKO_API_KEY },
-                timeout: 4000
-            });
-            if (response.data.solana) {
-                fetchedPrice = response.data.solana.usd;
-                priceFound = true;
+            const res = await fetch(`${API_URL}/state`);
+            if(!res.ok) throw new Error("Fetch Error");
+            const data = await res.json();
+
+            // Online Status
+            ui.statusDot.className = "status-dot status-online";
+            ui.connStatus.innerText = "ONLINE";
+            ui.connStatus.className = "text-green-500 font-bold";
+            if(data.backendVersion) ui.backendVersion.innerText = `v${data.backendVersion}`;
+
+            state.isResetting = data.isResetting;
+
+            // Market Data
+            if (data.market) {
+                const nU = Math.max(0, data.market.sharesUp - 50);
+                const nD = Math.max(0, data.market.sharesDown - 50);
+                const total = nU + nD || 1;
+
+                ui.lblSharesUp.innerText = nU.toFixed(0);
+                ui.lblSharesDown.innerText = nD.toFixed(0);
+                
+                ui.barUp.style.width = `${(nU/total)*100}%`; 
+                ui.barDown.style.width = `${(nD/total)*100}%`;
+                
+                ui.lblPriceUp.innerText = data.market.priceUp.toFixed(3);
+                ui.lblPriceDown.innerText = data.market.priceDown.toFixed(3);
+
+                if(data.market.changes) {
+                    formatChange(ui.up1m, data.market.changes.up1m);
+                    formatChange(ui.up5m, data.market.changes.up5m);
+                    formatChange(ui.down1m, data.market.changes.down1m);
+                    formatChange(ui.down5m, data.market.changes.down5m);
+                }
             }
-        } catch (e) { console.log(`CoinGecko Failed: ${e.message}`); }
-    }
 
-    if (priceFound) {
-        await stateMutex.runExclusive(async () => {
-            gameState.price = fetchedPrice;
-            gameState.lastPriceTimestamp = Date.now();
-            const currentWindowStart = getCurrentWindowStart();
+            // Price & Timer Data
+            ui.price.innerText = `$${data.price.toFixed(2)}`;
+            const diff = data.price - data.openPrice;
+            const color = diff >= 0 ? 'text-green-400' : 'text-red-500';
+            ui.change.innerHTML = `<span class="${color}">${diff>=0?'+':''}${diff.toFixed(2)}</span>`;
 
-            if (gameState.isResetting) return;
+            if(data.candleStartTime) {
+                 ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                 ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                 state.targetEndTime = data.candleEndTime;
+            }
+
+            if(data.currentVolume !== undefined) ui.currentPot.innerText = `${data.currentVolume.toFixed(3)} SOL`;
             
-            if (gameState.isPaused) {
-                const timeRemaining = (gameState.candleStartTime + FRAME_DURATION) - Date.now();
-                if (!gameState.isCancelled && timeRemaining < 300000 && timeRemaining > 0) {
-                    console.log("⚠️ Auto-cancelling due to prolonged pause...");
-                    await cancelCurrentFrameAndRefund(); 
-                    return;
-                }
-                if (currentWindowStart > gameState.candleStartTime) {
-                    console.log("> [SYS] Unpausing for new Frame.");
-                    if (!gameState.isCancelled) {
-                         const skippedFrameRecord = {
-                            id: gameState.candleStartTime,
-                            startTime: gameState.candleStartTime,
-                            endTime: gameState.candleStartTime + FRAME_DURATION,
-                            time: new Date(gameState.candleStartTime).toISOString(),
-                            open: gameState.candleOpen,
-                            close: fetchedPrice,
-                            result: "PAUSED", 
-                            sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
-                        };
-                        historySummary.unshift(skippedFrameRecord);
-                        if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
-                        await atomicWrite(HISTORY_FILE, historySummary);
-                        gameState.isPaused = false; 
-                    } else {
-                        gameState.isCancelled = false;
-                        gameState.isPaused = false;
-                    }
-                    gameState.candleStartTime = currentWindowStart;
-                    gameState.candleOpen = fetchedPrice;
-                    await saveSystemState();
-                }
-                return;
+            // UPDATE: Fill active users count
+            if(data.uniqueUsers !== undefined) {
+                ui.activeUsers.innerText = data.uniqueUsers;
+                ui.frameUsers.innerText = data.uniqueUsers;
             }
 
-            if (currentWindowStart > gameState.candleStartTime) {
-                if (gameState.candleStartTime === 0) {
-                    gameState.candleStartTime = currentWindowStart;
-                    gameState.candleOpen = fetchedPrice;
-                    await saveSystemState();
-                } else {
-                    gameState.isResetting = true; 
-                    await saveSystemState();
-                    closeFrame(fetchedPrice, currentWindowStart);
-                }
-            }
-
-            const totalS = gameState.poolShares.up + gameState.poolShares.down;
-            const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
-            const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
-            if (!gameState.sharePriceHistory) gameState.sharePriceHistory = [];
-            gameState.sharePriceHistory.push({ t: Date.now(), up: pUp, down: pDown });
-            const FIVE_MINS = 5 * 60 * 1000;
-            gameState.sharePriceHistory = gameState.sharePriceHistory.filter(x => x.t > Date.now() - FIVE_MINS);
-            await saveSystemState();
-        });
-    }
-}
-
-
-setInterval(updatePrice, 10000); 
-updatePrice(); 
-processPayoutQueue();
-
-// --- CACHE GENERATION ---
-function updatePublicStateCache() {
-    const now = Date.now();
-    const priceChange = gameState.price - gameState.candleOpen;
-    const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
-    const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
-
-    const totalShares = gameState.poolShares.up + gameState.poolShares.down;
-    const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
-    const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-
-    const history = gameState.sharePriceHistory || [];
-    const baseline = { up: 0.05, down: 0.05 };
-    const oneMinAgo = history.find(x => x.t >= now - 60000) || baseline;
-    const fiveMinAgo = history.find(x => x.t >= now - 300000) || baseline;
-
-    function getPercentChange(current, old) { if (!old || old === 0) return 0; return ((current - old) / old) * 100; }
-
-    const changes = {
-        up1m: getPercentChange(priceUp, oneMinAgo.up),
-        up5m: getPercentChange(priceUp, fiveMinAgo.up),
-        down1m: getPercentChange(priceDown, oneMinAgo.down),
-        down5m: getPercentChange(priceDown, fiveMinAgo.down),
-    };
-    
-    const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
-    const lastFramePot = historySummary.length > 0 ? historySummary[0].totalSol : 0;
-
-    cachedPublicState = {
-        price: gameState.price,
-        openPrice: gameState.candleOpen,
-        candleStartTime: gameState.candleStartTime,
-        candleEndTime: gameState.candleStartTime + FRAME_DURATION,
-        change: percentChange,
-        currentVolume: currentVolume,
-        uniqueUsers: uniqueUsers,
-        platformStats: globalStats,
-        isPaused: gameState.isPaused,
-        isResetting: gameState.isResetting,
-        isCancelled: gameState.isCancelled,
-        market: { 
-            priceUp, priceDown, 
-            sharesUp: gameState.poolShares.up, 
-            sharesDown: gameState.poolShares.down, 
-            changes 
-        },
-        history: historySummary,
-        recentTrades: gameState.recentTrades,
-        leaderboard: globalLeaderboard,
-        lastPriceTimestamp: gameState.lastPriceTimestamp,
-        backendVersion: BACKEND_VERSION,
-        payoutQueueLength: currentQueueLength,
-        lastFramePot: lastFramePot,
-        totalLifetimeUsers: globalStats.totalLifetimeUsers,
-        totalWinnings: globalStats.totalWinnings
-    };
-}
-
-setInterval(updatePublicStateCache, 500);
-
-// --- ENDPOINTS ---
-app.get('/api/state', stateLimiter, async (req, res) => {
-    if (!cachedPublicState) updatePublicStateCache();
-
-    const response = { ...cachedPublicState };
-    const now = new Date();
-    const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
-    response.msUntilClose = nextWindowStart - now.getTime();
-
-    const userKey = req.query.user;
-    if (userKey && isValidSolanaAddress(userKey)) {
-        const myStats = await getUser(userKey);
-        response.userStats = myStats;
-
-        const userBets = gameState.bets.filter(b => b.user === userKey);
-        response.activePosition = {
-            upShares: userBets.filter(b => b.direction === 'UP').reduce((a, b) => a + b.shares, 0),
-            downShares: userBets.filter(b => b.direction === 'DOWN').reduce((a, b) => a + b.shares, 0),
-            upSol: userBets.filter(b => b.direction === 'UP').reduce((a, b) => a + b.costSol, 0),
-            downSol: userBets.filter(b => b.direction === 'DOWN').reduce((a, b) => a + b.costSol, 0),
-            wageredSol: userBets.reduce((a, b) => a + b.costSol, 0)
-        };
-    }
-
-    res.json(response);
-});
-
-// NEW ENDPOINTS FOR STATUS IMAGES
-app.get('/api/image/fine', (req, res) => {
-    res.json({ image: cachedItsFineImage });
-});
-app.get('/api/image/over', (req, res) => {
-    res.json({ image: cachedItsOverImage });
-});
-app.get('/api/share-image', (req, res) => {
-    res.json({ image: cachedShareImage });
-});
-
-app.post('/api/verify-bet', betLimiter, async (req, res) => {
-    if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
-    if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
-    if (gameState.isCancelled) return res.status(400).json({ error: "MARKET_CANCELLED" });
-
-    const { signature, direction, userPubKey } = req.body;
-    
-    if (!signature || !userPubKey || !isValidSolanaAddress(userPubKey) || !isValidSignature(signature)) {
-        return res.status(400).json({ error: "INVALID_DATA_FORMAT" });
-    }
-    
-    if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
-
-    let solAmount = 0;
-    let txBlockTime = 0;
-    try {
-        const connection = new Connection(SOLANA_NETWORK, 'confirmed');
-        const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
-        if (!tx || tx.meta.err) return res.status(400).json({ error: "TX_INVALID" });
-        txBlockTime = tx.blockTime * 1000;
-        let housePubKeyStr = houseKeypair ? houseKeypair.publicKey.toString() : "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
-        const instructions = tx.transaction.message.instructions;
-        for (let ix of instructions) {
-            if (ix.program === 'system' && ix.parsed.type === 'transfer') {
-                if (ix.parsed.info.destination === housePubKeyStr) {
-                    solAmount = ix.parsed.info.lamports / 1000000000;
-                    break;
-                }
-            }
+        } catch (e) {
+            ui.statusDot.className = "status-dot status-offline";
+            ui.connStatus.innerText = "DISCONNECTED";
+            ui.connStatus.className = "text-red-500 font-bold";
+        } finally {
+            // Jittered Polling (2s + 0-400ms random delay)
+            const jitter = Math.floor(Math.random() * 400);
+            pollTimeout = setTimeout(poll, 2000 + jitter);
         }
-        if (solAmount <= 0) return res.status(400).json({ error: "NO_FUNDS" });
-    } catch (e) { return res.status(500).json({ error: "CHAIN_ERROR" }); }
-
-    const release = await stateMutex.acquire();
-    try {
-        if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
-        if (txBlockTime < gameState.candleStartTime) return res.status(400).json({ error: "TX_TIMESTAMP_EXPIRED" });
-        if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
-        if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
-
-        const totalShares = gameState.poolShares.up + gameState.poolShares.down;
-        let price = 0.05; 
-        if (direction === 'UP') price = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
-        else price = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-        
-        if(price < 0.001) price = 0.001;
-
-        const sharesReceived = solAmount / price;
-        
-        if (!Number.isFinite(sharesReceived) || sharesReceived <= 0) {
-             return res.status(500).json({ error: "CALCULATION_ERROR" });
-        }
-
-        if (direction === 'UP') gameState.poolShares.up += sharesReceived;
-        else gameState.poolShares.down += sharesReceived;
-
-        if (!knownUsers.has(userPubKey)) {
-            knownUsers.add(userPubKey);
-            globalStats.totalLifetimeUsers++;
-        }
-
-        getUser(userPubKey).then(userData => {
-            userData.totalSol += solAmount;
-            saveUser(userPubKey, userData);
-        });
-
-        gameState.bets.push({ signature, user: userPubKey, direction, costSol: solAmount, entryPrice: price, shares: sharesReceived, timestamp: Date.now() });
-        gameState.recentTrades.unshift({ user: userPubKey, direction, shares: sharesReceived, time: Date.now() });
-        if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
-
-        globalStats.totalVolume += solAmount;
-        processedSignatures.add(signature);
-        await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
-
-        updatePublicStateCache();
-
-        await saveSystemState();
-        res.json({ success: true, shares: sharesReceived, price: price });
-
-    } catch (e) { console.error(e); res.status(500).json({ error: "STATE_ERROR" }); } finally { release(); }
-});
-
-app.post('/api/admin/toggle-pause', async (req, res) => {
-    const auth = req.headers['x-admin-secret'];
-    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
-
-    const release = await stateMutex.acquire();
-    try {
-        gameState.isPaused = !gameState.isPaused;
-        if (!gameState.isPaused) gameState.isCancelled = false; 
-        await saveSystemState();
-        console.log(`> [ADMIN] Market Paused State toggled to: ${gameState.isPaused}`);
-        res.json({ success: true, isPaused: gameState.isPaused });
-    } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
-    finally { release(); }
-});
-
-app.post('/api/admin/cancel-frame', async (req, res) => {
-    const auth = req.headers['x-admin-secret'];
-    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
-    const release = await stateMutex.acquire();
-    try {
-        await cancelCurrentFrameAndRefund();
-        res.json({ success: true, message: "Frame Cancelled. Market Paused." });
-    } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
-    finally { release(); }
-});
-
-app.listen(PORT, () => { console.log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`); });
+    }
+</script>
