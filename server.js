@@ -1283,6 +1283,9 @@ function updatePublicStateCache() {
         lastFramePot: lastFramePot,
         totalLifetimeUsers: globalStats.totalLifetimeUsers,
         totalWinnings: globalStats.totalWinnings,
+        // Broadcast & Sentiment
+        broadcast: gameState.broadcast,
+        hourlySentiment: gameState.hourlySentiment,
         // Lottery summary
         lottery: {
             currentRound: lotteryState.currentRound,
@@ -1584,4 +1587,7 @@ setInterval(checkLotterySchedule, 60 * 60 * 1000);
 // Also check on startup after a short delay
 setTimeout(checkLotterySchedule, 10000);
 
-app.listen(PORT, () => { console.log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`); });
+app.listen(PORT, () => {
+    log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`, "SYS");
+    loadAndInit();
+});

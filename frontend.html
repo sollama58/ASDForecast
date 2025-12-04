@@ -509,7 +509,14 @@
             lotteryThreshold: document.getElementById('lottery-threshold'),
             lotteryHoldingInfo: document.getElementById('lottery-holding-info'),
             lotteryBalance: document.getElementById('lottery-balance'),
-            lotteryWeeks: document.getElementById('lottery-weeks')
+            lotteryWeeks: document.getElementById('lottery-weeks'),
+            // SENTIMENT UI ELEMENTS
+            broadcastContainer: document.getElementById('admin-broadcast-container'),
+            broadcastText: document.getElementById('broadcast-text'),
+            sentTimer: document.getElementById('sent-timer'),
+            sentBarFill: document.getElementById('sent-bar-fill'),
+            valSentUp: document.getElementById('val-sent-up'),
+            valSentDown: document.getElementById('val-sent-down')
         };
 
         if(ui.btnInc) ui.btnInc.onclick = () => adjustQty(1);
