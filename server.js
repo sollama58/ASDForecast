@@ -141,7 +141,8 @@ let knownUsers = new Set();
 let currentQueueLength = 0; 
 let payoutHistory = [];
 let cachedPublicState = null;
-let sentimentVotes = new Map(); 
+let sentimentVotes = new Map();
+let isProcessingQueue = false;
 
 function getNextHourTimestamp() {
     const now = new Date();
