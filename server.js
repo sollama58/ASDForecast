@@ -34,7 +34,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552;
 const UPKEEP_PERCENT = 0.0048; // 0.48%
 const FRAME_DURATION = 15 * 60 * 1000;
-const BACKEND_VERSION = "121.0"; // UPDATE: Lottery Activity Requirement
+const BACKEND_VERSION = "143.0"; // UPDATE: Lottery System + Sentiment Persistence Merge
 
 // --- LOTTERY CONFIG ---
 const LOTTERY_CONFIG = {
@@ -93,7 +93,11 @@ const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
 const SIGS_FILE = path.join(DATA_DIR, 'signatures.log');
 const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json');
 const LOTTERY_STATE_FILE = path.join(DATA_DIR, 'lottery_state.json');
-const LOTTERY_HISTORY_FILE = path.join(DATA_DIR, 'lottery_history.json'); 
+const LOTTERY_HISTORY_FILE = path.join(DATA_DIR, 'lottery_history.json');
+const PAYOUT_HISTORY_FILE = path.join(DATA_DIR, 'payout_history.json');
+const PAYOUT_MASTER_LOG = path.join(DATA_DIR, 'payout_master.log');
+const FAILED_REFUNDS_FILE = path.join(DATA_DIR, 'failed_refunds.json');
+const SENTIMENT_VOTES_FILE = path.join(DATA_DIR, 'sentiment_votes.json');
 
 log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
@@ -165,8 +169,9 @@ let cachedCirculatingSupply = { value: 0, timestamp: 0 };
 
 // --- STATE CACHING (NEW) ---
 let cachedPublicState = null;
-let sentimentVotes = new Map(); 
-let isProcessingQueue = false; 
+let sentimentVotes = new Map();
+let isProcessingQueue = false;
+let payoutHistory = []; 
 
 function getNextDayTimestamp() { // MODIFIED: Next Day Reset
     const now = new Date();
@@ -1463,6 +1468,21 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
         log(`> [ADMIN] Frame Cancelled by Admin`, "ADMIN");
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); }
+    finally { release(); }
+});
+
+app.post('/api/admin/broadcast', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
+    const { message, isActive } = req.body;
+    const release = await stateMutex.acquire();
+    try {
+        gameState.broadcast = { message: message || "", isActive: !!isActive };
+        await saveSystemState();
+        updatePublicStateCache();
+        log(`> [ADMIN] Broadcast updated: "${message}" (Active: ${isActive})`, "ADMIN");
+        res.json({ success: true, broadcast: gameState.broadcast });
+    } catch (e) { log(`> [ERR] Admin Broadcast Error: ${e}`, "ERR"); res.status(500).json({ error: "ADMIN_ERROR" }); }
     finally { release(); }
 });
 

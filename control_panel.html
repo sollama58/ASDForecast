@@ -1,4 +1,4 @@
-<!-- ASDForecast CONTROL PANEL v1.3 // LOTTERY CONTROLS -->
+<!-- ASDForecast CONTROL PANEL v1.4 // LOTTERY + BROADCAST MERGE -->
 
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -312,6 +312,23 @@
             const data = await res.json();
             if (data.success) alert("Frame Cancelled. Market Paused.");
             else { alert("Error: " + data.error); cachedAdminPassword = null; }
+        } catch (e) { alert("Network Error"); }
+    }
+
+    async function updateBroadcast(isActive) {
+        const msg = ui.broadcastMsg.value;
+        if (!msg && isActive) return alert("Please enter a message first.");
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
+        if (!pwd) return;
+        try {
+            const res = await fetch(`${API_URL}/admin/broadcast`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-admin-secret': pwd },
+                body: JSON.stringify({ message: msg, isActive: isActive })
+            });
+            const data = await res.json();
+            if (data.success) alert(`Broadcast Updated: ${isActive ? "ON" : "OFF"}`);
+            else alert("Error: " + data.error);
         } catch (e) { alert("Network Error"); }
     }
 
