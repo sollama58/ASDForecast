@@ -648,7 +648,7 @@
             }
             return `<tr class="border-b border-orange-900/20"><td class="py-2">${time}</td><td class="py-2 font-bold ${resColor}">${f.result}</td><td class="py-2">$${(f.open||0).toFixed(2)}</td><td class="py-2">$${(f.close||0).toFixed(2)}</td><td class="py-2">${(f.totalSol||0).toFixed(2)}</td><td class="py-2">${userStatus}</td></tr>`;
         }).join('');
-        //TEST REMOVE if(state.fullHistory.length > 3) ui.btnExpand.classList.remove('hidden');
+        //REMOVED DUE TO A BUG. Suspect this hid the Expand section previously, no longer an issue. if(state.fullHistory.length > 3) ui.btnExpand.classList.remove('hidden');
     }
 
     function renderTicker(trades) {
