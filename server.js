@@ -37,7 +37,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; // 0.48%
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "119.0"; // UPDATE: Caching & Input Sanitization
+const BACKEND_VERSION = "120.0"; // UPDATE: Status Images Support
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -101,21 +101,33 @@ async function atomicWrite(filePath, data) {
 
 // --- IMAGE CACHING ---
 let cachedShareImage = null;
-async function initShareImage() {
-    const src = process.env.BASE_IMAGE_SRC;
-    if (!src) return;
-    if (src.startsWith('http')) {
+let cachedItsFineImage = null;
+let cachedItsOverImage = null;
+
+async function cacheImage(url) {
+    if (!url) return null;
+    if (url.startsWith('http')) {
         try {
-            const response = await axios.get(src, { responseType: 'arraybuffer' });
+            const response = await axios.get(url, { responseType: 'arraybuffer' });
             const buffer = Buffer.from(response.data, 'binary');
             const type = response.headers['content-type'];
-            cachedShareImage = `data:${type};base64,${buffer.toString('base64')}`;
-        } catch (e) { console.error("> [ERR] Failed to cache share image:", e.message); }
-    } else {
-        cachedShareImage = src;
+            return `data:${type};base64,${buffer.toString('base64')}`;
+        } catch (e) { 
+            console.error(`> [ERR] Failed to cache image: ${url}`, e.message);
+            return null;
+        }
     }
+    return url;
 }
-initShareImage();
+
+async function initImages() {
+    console.log("> [SYS] Caching Images...");
+    cachedShareImage = await cacheImage(process.env.BASE_IMAGE_SRC);
+    cachedItsFineImage = await cacheImage(process.env.ITSFINE_IMG_SRC);
+    cachedItsOverImage = await cacheImage(process.env.ITSOVER_IMG_SRC);
+    console.log("> [SYS] Images Cached.");
+}
+initImages();
 
 let houseKeypair;
 try {
@@ -147,7 +159,7 @@ let globalLeaderboard = [];
 let knownUsers = new Set(); 
 let currentQueueLength = 0; 
 
-// --- STATE CACHING (NEW) ---
+// --- STATE CACHING ---
 let cachedPublicState = null;
 
 function loadGlobalState() {
@@ -178,7 +190,6 @@ function loadGlobalState() {
             }
         }
         
-        console.log("> [SYS] Loading user registry...");
         const userFiles = fsSync.readdirSync(USERS_DIR);
         userFiles.forEach(f => {
             if(f.startsWith('user_') && f.endsWith('.json')) {
@@ -228,7 +239,6 @@ async function saveSystemState() {
 }
 
 async function getUser(pubKey) {
-    // SANITIZATION: Strict check before file system access
     if (!isValidSolanaAddress(pubKey)) {
         return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
     }
@@ -243,9 +253,7 @@ async function getUser(pubKey) {
 }
 
 async function saveUser(pubKey, data) {
-    // SANITIZATION: Strict check
     if (!isValidSolanaAddress(pubKey)) return;
-
     try {
         const file = path.join(USERS_DIR, `user_${pubKey}.json`);
         await atomicWrite(file, data);
@@ -254,7 +262,6 @@ async function saveUser(pubKey, data) {
 
 loadGlobalState();
 
-// ... (unchanged ASDF logic) ... 
 async function updateASDFPurchases() {
     const connection = new Connection(SOLANA_NETWORK); 
     try {
@@ -311,7 +318,6 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
-// ... (queue logic unchanged) ...
 async function processPayoutQueue() {
     const release = await payoutMutex.acquire();
     try {
@@ -394,7 +400,6 @@ async function processPayoutQueue() {
     finally { release(); }
 }
 
-// ... (queuePayouts, processRefunds unchanged) ...
 async function queuePayouts(frameId, result, bets, totalVolume) {
     if (totalVolume === 0) return;
     const queue = []; 
@@ -507,6 +512,7 @@ async function cancelCurrentFrameAndRefund() {
     await saveSystemState();
 }
 
+
 async function closeFrame(closePrice, closeTime) {
     const release = await stateMutex.acquire(); 
     try {
@@ -602,14 +608,8 @@ async function closeFrame(closePrice, closeTime) {
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
-        await queuePayouts(frameId, result, betsSnapshot, frameSol);
+        updatePublicStateCache();
 
-        gameState.candleStartTime = closeTime;
-        gameState.candleOpen = closePrice;
-        gameState.poolShares = { up: 50, down: 50 }; 
-        gameState.bets = []; 
-        gameState.sharePriceHistory = [];
-        gameState.isResetting = false; 
         await saveSystemState();
         
     } finally { release(); }
@@ -713,8 +713,7 @@ setInterval(updatePrice, 10000);
 updatePrice(); 
 processPayoutQueue();
 
-// --- CACHE GENERATION (NEW) ---
-// Updates the public state cache every 500ms
+// --- CACHE GENERATION ---
 function updatePublicStateCache() {
     const now = Date.now();
     const priceChange = gameState.price - gameState.candleOpen;
@@ -742,7 +741,6 @@ function updatePublicStateCache() {
     const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
     const lastFramePot = historySummary.length > 0 ? historySummary[0].totalSol : 0;
 
-    // The Cache Object
     cachedPublicState = {
         price: gameState.price,
         openPrice: gameState.candleOpen,
@@ -773,23 +771,17 @@ function updatePublicStateCache() {
     };
 }
 
-// Start the cache update loop
 setInterval(updatePublicStateCache, 500);
 
 // --- ENDPOINTS ---
 app.get('/api/state', stateLimiter, async (req, res) => {
-    // Fallback if cache is not yet built (e.g. immediately after restart)
     if (!cachedPublicState) updatePublicStateCache();
 
-    // Start with cached data
     const response = { ...cachedPublicState };
-
-    // Re-calculate precise time remaining to ensure countdown is smooth
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
     response.msUntilClose = nextWindowStart - now.getTime();
 
-    // Handle personalized data ONLY if a valid user key is provided
     const userKey = req.query.user;
     if (userKey && isValidSolanaAddress(userKey)) {
         const myStats = await getUser(userKey);
@@ -808,6 +800,13 @@ app.get('/api/state', stateLimiter, async (req, res) => {
     res.json(response);
 });
 
+// NEW ENDPOINTS FOR STATUS IMAGES
+app.get('/api/image/fine', (req, res) => {
+    res.json({ image: cachedItsFineImage });
+});
+app.get('/api/image/over', (req, res) => {
+    res.json({ image: cachedItsOverImage });
+});
 app.get('/api/share-image', (req, res) => {
     res.json({ image: cachedShareImage });
 });
@@ -819,7 +818,6 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
 
     const { signature, direction, userPubKey } = req.body;
     
-    // SANITIZATION
     if (!signature || !userPubKey || !isValidSolanaAddress(userPubKey) || !isValidSignature(signature)) {
         return res.status(400).json({ error: "INVALID_DATA_FORMAT" });
     }
@@ -869,7 +867,6 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
-        // UPDATE: Check and update knownUsers for lifetime stats
         if (!knownUsers.has(userPubKey)) {
             knownUsers.add(userPubKey);
             globalStats.totalLifetimeUsers++;
@@ -888,7 +885,6 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
         processedSignatures.add(signature);
         await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
 
-        // Trigger immediate cache refresh to reflect volume/shares changes
         updatePublicStateCache();
 
         await saveSystemState();

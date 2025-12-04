@@ -1,4 +1,4 @@
-<!-- ASDForecast v111.4 // UI: LIFETIME PAYOUTS & SHARE FONT STYLE MATCH -->
+<!-- ASDForecast v112.0 // UI: LAST FRAME IMAGE & LAYOUT -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -180,7 +180,16 @@
                                 </div>
                                 <div class="flex justify-between items-center border-t border-orange-500/20 pt-1 mt-1"><span class="text-orange-300/70">Est. Win Payout:</span><span id="stat-payout" class="text-yellow-400 font-bold">0.00 SOL</span></div>
                             </div>
-                            <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono"><span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">Last Frame Performance</span><div id="last-frame-stats" class="text-orange-200">Waiting for close...</div></div>
+                            
+                            <!-- LAST FRAME PERFORMANCE (UPDATED LAYOUT) -->
+                            <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono flex justify-between items-center gap-2">
+                                <div id="last-frame-stats" class="flex-grow">
+                                    <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">Last Frame Performance</span>
+                                    <div class="text-orange-200 italic opacity-50">Waiting for close...</div>
+                                </div>
+                                <!-- DYNAMIC STATUS IMAGE -->
+                                <img id="last-frame-img" src="" class="w-12 h-12 rounded border border-orange-900/50 hidden object-cover" alt="Status">
+                            </div>
                         </div>
                     </div>
 
@@ -259,7 +268,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v111.4</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v112.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -283,7 +292,7 @@
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
     let PublicKey, SystemProgram, Transaction;
-    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null };
+    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null, images: { fine: null, over: null } };
     let ui = {};
     let pollTimeout = null; // Store timeout ID for cleanup
 
@@ -334,7 +343,8 @@
             frameUsers: document.getElementById('frame-users'),
             globalLastPayout: document.getElementById('link-last-payout'), // Changed ID to target anchor tag
             globalWinnings: document.getElementById('global-winnings'),
-            globalLifetimeUsers: document.getElementById('global-lifetime-users')
+            globalLifetimeUsers: document.getElementById('global-lifetime-users'),
+            lastFrameImg: document.getElementById('last-frame-img')
         };
 
         if(ui.btnInc) ui.btnInc.onclick = () => adjustQty(1);
@@ -343,6 +353,10 @@
         ui.connect.onclick = connect;
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
+
+        // Fetch Images immediately
+        fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
+        fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
 
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
@@ -480,6 +494,7 @@
              
              // --- BOTTOM LEFT/RIGHT FOOTER TEXT (UPDATED STYLE) ---
              
+             // Setup white fill and black stroke for footer text
              ctx.font = "bold 24px sans-serif"; // Bold font matching title style
              ctx.lineWidth = 4; // Thick stroke
              ctx.strokeStyle = "black";
@@ -710,6 +725,8 @@
                              const log = state.userLog[last.id];
                              let res = log.result === 'WIN' ? `<span class="text-green-400">WIN</span>` : `<span class="text-red-400">LOSS</span>`;
                              if (log.result === 'CANCELLED') res = `<span class="text-yellow-500">REFUNDED</span>`;
+                             
+                             // TEXT UPDATE
                              ui.lastFrameStats.innerHTML = `
                                 <div class="flex justify-between"><span>Vol:</span> <span>${last.totalSol.toFixed(2)} SOL</span></div>
                                 <div class="flex justify-between text-[10px] border-t border-white/10 pt-1 mt-1">
@@ -717,7 +734,21 @@
                                 </div>
                                 <div class="flex justify-between border-t border-white/10 mt-1 pt-1"><span>Result:</span> ${res}</div>
                              `;
-                        } else { ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; }
+                             
+                             // IMAGE UPDATE
+                             if (state.images) {
+                                 ui.lastFrameImg.classList.remove('hidden');
+                                 if (log.result === 'LOSS') {
+                                     ui.lastFrameImg.src = state.images.over || '';
+                                 } else {
+                                     ui.lastFrameImg.src = state.images.fine || ''; // WIN, REFUND, etc.
+                                 }
+                             }
+
+                        } else { 
+                            ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; 
+                            ui.lastFrameImg.classList.add('hidden');
+                        }
                     }
                 }
                 renderHistory();
@@ -769,13 +800,17 @@
 
         if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) {
 
-            return alert("Market has closed. Calculating results.");
+            alert("Market has closed. Calculating results.");
+            return;
 
         }
 
 
 
-        if(!state.isOnline) return alert("System Offline");
+        if(!state.isOnline) { 
+            alert("System Offline");
+            return; 
+        }
 
         const qty = parseInt(ui.qty.value);
 
@@ -809,9 +844,17 @@
 
             const d = await res.json();
 
-            if(d.success) { alert(`Bought ${Math.round(d.shares)} shares!`); refreshBalance(); } else alert(d.error);
+            if(d.success) { 
+                alert(`Bought ${Math.round(d.shares)} shares!`);
+                refreshBalance(); 
+            } else { 
+                alert(d.error);
+            }
 
-        } catch(e) { console.error(e); alert("Tx Failed"); } finally { btn.innerHTML = old; btn.disabled = false; }
+        } catch(e) { 
+            console.error(e); 
+            alert("Tx Failed");
+        } finally { btn.innerHTML = old; btn.disabled = false; }
 
     }
 </script>
