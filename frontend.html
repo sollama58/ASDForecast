@@ -1,4 +1,4 @@
-<!-- ASDForecast v120.0 // FEATURE: HOURLY SENTIMENT METER -->
+<!-- ASDForecast v121.0 // FIX: SENTIMENT METER, PROGRESS BAR & IMAGE LOAD -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -77,7 +77,7 @@
     /* SENTIMENT METER STYLES */
     .sent-btn {
         width: 60px; height: 60px;
-        border-radius: 50%;
+        border-radius: 8px; /* SQUARE BOX */
         border: 2px solid #444;
         transition: transform 0.1s, border-color 0.2s;
         overflow: hidden;
@@ -214,7 +214,7 @@
                         <span>UP: <span id="val-sent-up" class="text-green-400 font-bold">0</span></span>
                         <span>DOWN: <span id="val-sent-down" class="text-red-400 font-bold">0</span></span>
                     </div>
-                    <p class="text-[9px] text-center mt-3 text-gray-600 font-mono">Vote once per 15s. Resets hourly.</p>
+                    <p class="text-[9px] text-center mt-3 text-gray-600 font-mono">Vote once per 15 mins. Resets hourly.</p>
                 </div>
 
             </div>
@@ -324,7 +324,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v120.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v121.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -383,6 +383,7 @@
 <script>
     const HOUSE_PUBKEY = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; // MAINNET WALLET
     const API_URL = 'https://asdforecast.onrender.com/api'; 
+    // SECURITY NOTE: This key is visible to the client. Restrict origin in Helius Dashboard!
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
     let PublicKey, SystemProgram, Transaction;
@@ -464,12 +465,12 @@
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
 
-        // Fetch Images
+        // Fetch Images immediately
         fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
         fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
-        // NEW SENTIMENT IMAGES
-        fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentUp) ui.imgSentUp.src = d.image; state.images.sentUp = d.image; });
-        fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentDown) ui.imgSentDown.src = d.image; state.images.sentDown = d.image; });
+        // NEW SENTIMENT IMAGES (Fixed to assign to state)
+        fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentUp) { ui.imgSentUp.src = d.image; state.images.sentUp = d.image; } });
+        fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentDown) { ui.imgSentDown.src = d.image; state.images.sentDown = d.image; } });
 
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
@@ -486,8 +487,13 @@
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
     });
     
-    // NEW: Sentiment Vote Logic
+    // NEW: Sentiment Vote Logic with PubKey Validation
     window.voteSentiment = async function(dir) {
+        if (!state.pubKey) {
+            alert("Please connect your wallet to vote.");
+            return;
+        }
+
         const btn = dir === 'UP' ? ui.btnSentUp : ui.btnSentDown;
         btn.disabled = true; // Immediate visual feedback
         
@@ -495,17 +501,17 @@
             const res = await fetch(`${API_URL}/api/sentiment/vote`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ direction: dir })
+                body: JSON.stringify({ direction: dir, userPubKey: state.pubKey.toString() })
             });
             const data = await res.json();
-            if (data.error === "COOLDOWN_ACTIVE") {
-                alert("Cooldown active: Please vote once every 15 seconds.");
+            if (data.error === "COOLDOWN_ACTIVE" || data.error === "VOTE_COOLDOWN") {
+                alert("Cooldown active: You can only vote once every 15 minutes.");
             } else if (!data.success) {
-                alert("Vote failed.");
+                alert("Vote failed: " + (data.error || "Unknown error"));
             }
         } catch(e) { console.error(e); }
         
-        // Keep disabled for 15s
+        // Keep disabled for 15s visually (backend enforces 15m)
         setTimeout(() => { btn.disabled = false; }, 15000);
     };
 
@@ -643,19 +649,13 @@
         }).join('');
     }
 
-    function renderTicker(trades) {
-        if(!trades || !ui.ticker) return;
-        ui.ticker.innerHTML = trades.slice(0,10).map(t => `<div class="ticker-item">[ ${t.user.slice(0,4)}.. bought <span class="${t.direction==='UP'?'text-green-400':'text-red-400'}">${t.shares.toFixed(1)} ${t.direction}</span> ]</div>`).join('');
-    }
-
-    function renderLeaderboard(data) {
-        if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Data Yet</td></tr>'; return; }
-        ui.leaderboardRows.innerHTML = data.map((user, index) => `<tr class="border-b border-orange-900/20"><td class="py-2 text-white font-bold"><span class="text-orange-500 mr-2">#${index+1}</span> ${user.pubKey.slice(0,5)}...</td><td class="py-2 text-right text-gray-300">${user.bets}</td><td class="py-2 text-right text-yellow-400">${user.winRate.toFixed(0)}%</td><td class="py-2 text-right text-green-400 font-bold">${user.totalWon.toFixed(2)} SOL</td></tr>`).join('');
-    }
+    function renderTicker(trades) { if(!trades || !ui.ticker) return; ui.ticker.innerHTML = trades.slice(0,10).map(t => `<div class="ticker-item">[ ${t.user.slice(0,4)}.. bought <span class="${t.direction==='UP'?'text-green-400':'text-red-400'}">${t.shares.toFixed(1)} ${t.direction}</span> ]</div>`).join(''); }
+    function renderLeaderboard(data) { if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Data Yet</td></tr>'; return; } ui.leaderboardRows.innerHTML = data.map((user, index) => `<tr class="border-b border-orange-900/20"><td class="py-2 text-white font-bold"><span class="text-orange-500 mr-2">#${index+1}</span> ${user.pubKey.slice(0,5)}...</td><td class="py-2 text-right text-gray-300">${user.bets}</td><td class="py-2 text-right text-yellow-400">${user.winRate.toFixed(0)}%</td><td class="py-2 text-right text-green-400 font-bold">${user.totalWon.toFixed(2)} SOL</td></tr>`).join(''); }
 
     async function poll() {
         if (document.hidden) return;
         if (!ui || !ui.price) return;
+
         try {
             let url = `${API_URL}/state`; if(state.pubKey) url += `?user=${state.pubKey.toString()}`;
             const res = await fetch(url); if(!res.ok) throw new Error(res.statusText); const data = await res.json();
@@ -667,7 +667,7 @@
             if (data.isResetting) { ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "RESETTING"; ui.statusText.className = "text-blue-400"; if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; } ui.timer.innerText = "Resetting..."; }
             else if (data.isCancelled) { ui.netSharesHeader.innerText = "FRAME CANCELLED"; ui.netSharesHeader.classList.add("text-red-500"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "CANCELLED"; ui.statusText.className = "text-red-500"; if(ui.pauseText) { ui.pauseText.innerText = "FRAME CANCELLED - funds refunded"; ui.pauseText.className = "text-red-500 font-bold text-xl"; } }
             else if (data.isPaused) { ui.netSharesHeader.innerText = "MARKET PAUSED"; ui.netSharesHeader.classList.add("text-red-500"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "PAUSED"; ui.statusText.className = "text-yellow-500"; ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-yellow-900/50"; if(ui.pauseText) { ui.pauseText.innerText = "FRAME PAUSED"; ui.pauseText.className = "text-yellow-500 font-bold text-xl"; } }
-            else { if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { ui.netSharesHeader.innerText = "CALCULATING..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; } } else { ui.netSharesHeader.innerText = "Net Shares Bought"; ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse"); ui.btnUp.disabled = false; ui.btnDown.disabled = false; ui.qty.disabled = false; ui.pauseOverlay.classList.add('hidden'); } }
+            else { if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; } } else { ui.netSharesHeader.innerText = "Net Shares Bought"; ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse"); ui.btnUp.disabled = false; ui.btnDown.disabled = false; ui.qty.disabled = false; ui.pauseOverlay.classList.add('hidden'); } }
 
             if (data.market) {
                 state.prices = { up: data.market.priceUp, down: data.market.priceDown }; if(data.market.changes) { formatChange(ui.up1m, data.market.changes.up1m); formatChange(ui.up5m, data.market.changes.up5m); formatChange(ui.down1m, data.market.changes.down1m); formatChange(ui.down5m, data.market.changes.down5m); }
@@ -680,12 +680,12 @@
 
             state.fullHistory = data.history || [];
             
-            if(data.platformStats) { ui.statGlobalVol.innerText = `${data.platformStats.totalVolume.toFixed(2)} SOL`; ui.statGlobalFees.innerText = `${data.platformStats.totalFees.toFixed(3)} SOL`; if(ui.statGlobalASDF && data.platformStats.totalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF).toLocaleString() + " ASDF"; }
+            if(data.platformStats) { ui.statGlobalVol.innerText = `${data.platformStats.totalVolume.toFixed(2)} SOL`; ui.statGlobalFees.innerText = `${data.platformStats.totalFees.toFixed(3)} SOL`; if(ui.statGlobalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF).toLocaleString() + " ASDF"; }
             if(data.uniqueUsers !== undefined) ui.frameUsers.innerText = data.uniqueUsers; if(data.totalLifetimeUsers) ui.globalLifetimeUsers.innerText = data.totalLifetimeUsers.toLocaleString(); if(data.totalWinnings !== undefined) ui.globalWinnings.innerText = `${data.totalWinnings.toFixed(2)} SOL`;
             if (data.lastFramePot !== undefined) { const statusIcon = data.payoutQueueLength === 0 ? "✅" : "⏳"; ui.globalLastPayout.innerText = `${statusIcon} ${data.lastFramePot.toFixed(2)} SOL`; }
             if (data.broadcast && data.broadcast.isActive && data.broadcast.message) { ui.broadcastContainer.classList.remove('hidden'); ui.broadcastText.innerText = data.broadcast.message; } else { ui.broadcastContainer.classList.add('hidden'); }
             
-            // UPDATE: SENTIMENT UI
+            // UPDATE: SENTIMENT UI (POLLING)
             if (data.hourlySentiment) {
                 const sUp = data.hourlySentiment.up;
                 const sDown = data.hourlySentiment.down;
@@ -694,10 +694,17 @@
                 ui.valSentDown.innerText = sDown;
                 ui.sentBarFill.style.width = `${(sUp / sTotal) * 100}%`;
                 
+                // Set background color of bar based on dominance
+                if (sUp > sDown) { ui.sentBarFill.style.backgroundColor = 'var(--bg-up-color, #22c55e)'; }
+                else if (sDown > sUp) { ui.sentBarFill.style.backgroundColor = 'var(--bg-down-color, #ef4444)'; }
+                else { ui.sentBarFill.style.backgroundColor = '#fb923c'; } // Neutral color
+                
                 const now = Date.now();
                 if (data.hourlySentiment.nextReset > now) {
-                     const mins = Math.floor((data.hourlySentiment.nextReset - now) / 60000);
-                     ui.sentTimer.innerText = `Reset: ${mins}m`;
+                     const totalSeconds = Math.floor((data.hourlySentiment.nextReset - now) / 1000);
+                     const mins = Math.floor(totalSeconds / 60);
+                     const secs = totalSeconds % 60;
+                     ui.sentTimer.innerText = `Reset: ${mins}m ${secs}s`;
                 } else {
                      ui.sentTimer.innerText = `Resetting...`;
                 }

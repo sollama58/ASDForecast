@@ -32,7 +32,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; 
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "141.2"; // FIX: isProcessingQueue Scope
+const BACKEND_VERSION = "141.3"; // HOTFIX: userPositions ReferenceError
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- LOGGING ---
@@ -56,7 +56,7 @@ function isValidSignature(signature) { return typeof signature === 'string' && S
 const betLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 10, message: { error: "RATE_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
 const stateLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 120, message: { error: "POLLING_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
 const voteLimiter = rateLimit({ 
-    windowMs: 15 * 1000, 
+    windowMs: 15 * 60 * 1000, // 15 minute cooldown
     max: 1, 
     message: { error: "COOLDOWN_ACTIVE" }, 
     standardHeaders: true, 
@@ -142,7 +142,7 @@ let currentQueueLength = 0;
 let payoutHistory = [];
 let cachedPublicState = null;
 let sentimentVotes = new Map(); 
-let isProcessingQueue = false; // MOVED HERE: Global scope initialization
+let isProcessingQueue = false; 
 
 function getNextHourTimestamp() {
     const now = new Date();
@@ -313,7 +313,9 @@ async function processPayoutQueue() {
         while (queueData.length > 0) {
             const batch = queueData[0];
             if (typeof batch.retries === 'undefined') batch.retries = 0;
+
             const { type, recipients, frameId } = batch;
+            
             try {
                 const tx = new Transaction();
                 const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_UNITS });
@@ -469,7 +471,6 @@ async function processRefunds(frameId, bets) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
         queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch, retries: 0 }); 
     }
-
     const release = await payoutMutex.acquire();
     try {
         let existingQueue = [];
@@ -524,6 +525,7 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
+        // FIX: Declare feeAmt and upkeepAmt at top level with defaults
         let feeAmt = 0;
         let upkeepAmt = 0;
 
@@ -538,9 +540,12 @@ async function closeFrame(closePrice, closeTime) {
 
         let winnerCount = 0;
         let payoutTotal = 0;
+        // FIX: userPositions must be declared here to avoid ReferenceError below
+        const userPositions = {}; 
+        
         if (result !== "FLAT") {
             const potSol = frameSol * 0.94;
-            const userPositions = {};
+            // NOTE: userPositions defined outside the IF statement now (hoisted)
             gameState.bets.forEach(bet => {
                 if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
                 if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
@@ -560,7 +565,7 @@ async function closeFrame(closePrice, closeTime) {
                 globalStats.totalWinnings += payoutTotal; 
             }
         }
-
+        
         const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
         
         const frameRecord = {
@@ -576,6 +581,7 @@ async function closeFrame(closePrice, closeTime) {
         await atomicWrite(HISTORY_FILE, historySummary);
 
         const betsSnapshot = [...gameState.bets];
+        // NOTE: userPositions used here now safely declared
         const usersToUpdate = Object.entries(userPositions);
         const USER_IO_BATCH_SIZE = 20; 
         for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
@@ -624,7 +630,6 @@ async function closeFrame(closePrice, closeTime) {
 async function updatePrice() {
     let fetchedPrice = 0;
     let priceFound = false;
-
     try {
         const response = await axios.get(`${PYTH_HERMES_URL}?ids[]=${SOL_FEED_ID}`, { timeout: 2000 });
         if (response.data && response.data.parsed && response.data.parsed[0]) {
@@ -763,6 +768,7 @@ function updatePublicStateCache() {
     };
     const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
     const lastFramePot = historySummary.length > 0 ? historySummary[0].totalSol : 0;
+
     cachedPublicState = {
         price: gameState.price,
         openPrice: gameState.candleOpen,
@@ -845,9 +851,7 @@ app.post('/api/sentiment/vote', voteLimiter, async (req, res) => {
         updatePublicStateCache(); 
         log(`> [SENTIMENT] Vote: ${direction} from ${userPubKey.slice(0,6)}`, "SENT");
         res.json({ success: true, sentiment: gameState.hourlySentiment });
-    } finally {
-        release();
-    }
+    } finally { release(); }
 });
 
 app.get('/api/admin/logs', (req, res) => {
