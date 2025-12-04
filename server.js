@@ -37,7 +37,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; // 0.48%
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "120.1"; // UPDATE: Failsafe for stuck RESETTING state
+const BACKEND_VERSION = "121.0"; // UPDATE: Refund-based Failsafe
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -547,10 +547,9 @@ async function closeFrame(closePrice, closeTime) {
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
                 let dir = "FLAT";
-                if (rUp > rDown) userDir = "UP";
-                else if (rDown > rUp) userDir = "DOWN";
-                if (rUp === rDown) userDir = "FLAT";
-
+                if (rUp > rDown) dir = "UP";
+                else if (rDown > rUp) dir = "DOWN";
+                if (rUp === rDown) dir = "FLAT";
                 if (dir === result) winnerCount++;
             }
             if (winnerCount > 0) {
@@ -649,29 +648,26 @@ async function updatePrice() {
             const currentWindowStart = getCurrentWindowStart();
 
             // RECOVERY MECHANISM FOR STUCK RESETTING STATE (NEW)
-            if (gameState.isResetting && currentWindowStart > gameState.candleStartTime) {
-                 console.log("⚠️ [RECOVER] Detected stuck RESETTING state. Forcing next frame start.");
-                 gameState.isResetting = false; 
-                 // Ensure the current (stuck) frame is skipped in history (as PAUSED state)
-                 const skippedFrameRecord = {
-                    id: gameState.candleStartTime,
-                    startTime: gameState.candleStartTime,
-                    endTime: gameState.candleStartTime + FRAME_DURATION,
-                    time: new Date(gameState.candleStartTime).toISOString(),
-                    open: gameState.candleOpen,
-                    close: fetchedPrice,
-                    result: "PAUSED", 
-                    sharesUp: 0, sharesDown: 0, totalSol: 0, winners: 0, payout: 0
-                };
-                historySummary.unshift(skippedFrameRecord);
-                if(historySummary.length > 100) historySummary = historySummary.slice(0,100);
-                await atomicWrite(HISTORY_FILE, historySummary);
+            const frameEndTime = gameState.candleStartTime + FRAME_DURATION;
+            // If stuck in Resetting > 1 minute after close, trigger full REFUND and move on.
+            if (gameState.isResetting && Date.now() > (frameEndTime + 60000)) {
+                 console.log("⚠️ [FAILSAFE] RESETTING stuck > 1m. Refunds issued. Starting new frame.");
                  
+                 // 1. Refund everyone in the stuck frame
+                 await cancelCurrentFrameAndRefund();
+                 
+                 // 2. Advance State (Unpause & Reset flags)
+                 gameState.isResetting = false; 
+                 gameState.isPaused = false; // Force unpause
+                 gameState.isCancelled = false; // Clear cancelled flag for new frame
+                 
+                 // 3. Set New Frame Times
                  gameState.candleStartTime = currentWindowStart;
                  gameState.candleOpen = fetchedPrice;
-                 gameState.poolShares = { up: 50, down: 50 }; 
-                 gameState.bets = []; 
-                 gameState.sharePriceHistory = [];
+                 gameState.poolShares = { up: 50, down: 50 }; // Reset pool
+                 gameState.bets = []; // Ensure bets are clear (cancelCurrentFrameAndRefund does this, but safety first)
+                 gameState.sharePriceHistory = []; // Reset chart
+                 
                  await saveSystemState();
                  updatePublicStateCache();
                  return;
