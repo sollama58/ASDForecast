@@ -1,4 +1,4 @@
-<!-- ASDForecast v125.1 // FIX: LAST FRAME DATA DISPLAY & SUBTITLE -->
+<!-- ASDForecast v126.0 // UI: LEADERBOARD FIX & LAST FRAME UPDATES -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -247,8 +247,9 @@
                                 <div class="flex justify-between items-center border-t border-orange-500/20 pt-1 mt-1"><span class="text-orange-300/70">Est. Win Payout:</span><span id="stat-payout" class="text-yellow-400 font-bold">0.00 SOL</span></div>
                             </div>
                             
-                            <!-- LAST FRAME PERFORMANCE (UPDATED LAYOUT) -->
-                            <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono flex justify-between items-center gap-2">
+                            <!-- LAST FRAME PERFORMANCE (UPDATED LAYOUT v126) -->
+                            <!-- Changed background from bg-black/50 to bg-orange-900/20 for visibility -->
+                            <div class="bg-orange-900/20 p-2 rounded border border-orange-900/50 text-xs font-mono flex justify-between items-center gap-2">
                                 <div class="flex-grow">
                                     <!-- STATIC HEADER -->
                                     <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
@@ -331,7 +332,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v125.1</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v126.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -653,9 +654,7 @@
 
     function renderHistory() {
         if (!state.fullHistory || state.fullHistory.length === 0) { ui.historyRows.innerHTML = '<tr><td colspan="6" class="py-2 italic opacity-50">Waiting for first frame close...</td></tr>'; return; }
-        const now = Date.now();
-        const validHistory = state.fullHistory.filter(f => (f.endTime || 0) <= now);
-        const dataToShow = state.isHistoryExpanded ? validHistory.slice(0, 50) : validHistory.slice(0, 3);
+        const now = Date.now(); const validHistory = state.fullHistory.filter(f => (f.endTime || 0) <= now); const dataToShow = state.isHistoryExpanded ? validHistory.slice(0, 50) : validHistory.slice(0, 3);
 
         ui.historyRows.innerHTML = dataToShow.map(f => {
             // MODIFIED: Use endTime for display time if available, fallback to start time
@@ -688,7 +687,7 @@
     }
 
     function renderLeaderboard(data) {
-        if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Data Yet</td></tr>'; return; }
+        if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Degens Yet</td></tr>'; return; }
         ui.leaderboardRows.innerHTML = data.map((user, index) => `
             <tr class="border-b border-orange-900/20">
                 <td class="py-2 text-white font-bold"><span class="text-orange-500 mr-2">#${index+1}</span> ${user.pubKey.slice(0,5)}...</td>
@@ -719,7 +718,8 @@
                  return; 
             }
 
-            if(!res.ok) throw new Error(res.statusText); const data = await res.json();
+            if(!res.ok) throw new Error(res.statusText);
+            const data = await res.json();
             
             state.isOnline = true;
             // UPDATE: Reset status display to default
@@ -826,6 +826,44 @@
                     ui.broadcastContainer.classList.add('hidden');
                 }
 
+                // RE-ADD LEADERBOARD LOGIC - ENSURE IT CALLS
+                if(data.leaderboard) renderLeaderboard(data.leaderboard);
+                if(data.recentTrades) renderTicker(data.recentTrades);
+                
+                // UPDATE: SENTIMENT UI (POLLING)
+                if (data.hourlySentiment) {
+                    const sUp = data.hourlySentiment.up;
+                    const sDown = data.hourlySentiment.down;
+                    const sTotal = sUp + sDown || 1;
+                    ui.valSentUp.innerText = sUp;
+                    ui.valSentDown.innerText = sDown;
+                    
+                    // FIX: Progress Bar Calculation
+                    const upPercent = sTotal > 0 ? (sUp / sTotal) * 100 : 50;
+                    ui.sentBarFill.style.width = `${upPercent}%`;
+                    
+                    if (sUp > sDown) { ui.sentBarFill.style.backgroundColor = '#22c55e'; }
+                    else if (sDown > sUp) { ui.sentBarFill.style.backgroundColor = '#ef4444'; }
+                    else { ui.sentBarFill.style.backgroundColor = '#fb923c'; }
+
+                    // Calc Time
+                    const now = Date.now();
+                    if (data.hourlySentiment.nextReset > now) {
+                         const totalSeconds = Math.floor((data.hourlySentiment.nextReset - now) / 1000);
+                         const mins = Math.floor(totalSeconds / 60); // Updated to min only for hourly/daily
+                         const hours = Math.floor(mins / 60);
+                         const displayMins = mins % 60;
+                         ui.sentTimer.innerText = `Reset: ${hours}h ${displayMins}m`;
+                    } else {
+                         ui.sentTimer.innerText = `Resetting...`;
+                    }
+                }
+                
+                // FIX: Image Population
+                if (state.images.sentUp) ui.imgSentUp.src = state.images.sentUp; else ui.imgSentUp.style.display='none';
+                if (state.images.sentDown) ui.imgSentDown.src = state.images.sentDown; else ui.imgSentDown.style.display='none';
+
+
                 if(data.userStats) {
                     state.userLog = data.userStats.frameLog || {};
                     ui.statsContainer.classList.remove('hidden');
@@ -846,8 +884,9 @@
                              if (log.result === 'REFUNDED_ERROR') res = `<span class="text-yellow-500 font-bold">⚠️ REFUNDED</span>`;
                              
                              // TEXT UPDATE
+                             // UPDATE: Change "Vol" to "My Wager"
                              ui.lastFrameStats.innerHTML = `
-                                <div class="flex justify-between"><span>Vol:</span> <span>${last.totalSol.toFixed(2)} SOL</span></div>
+                                <div class="flex justify-between"><span>My Wager:</span> <span>${(log.wagered || 0).toFixed(3)} SOL</span></div>
                                 <div class="flex justify-between text-[10px] border-t border-white/10 pt-1 mt-1">
                                     <span class="text-green-400">UP: ${Math.round(log.upShares||0)}</span> <span class="text-red-400">DOWN: ${Math.round(log.downShares||0)}</span>
                                 </div>
@@ -866,8 +905,8 @@
                     }
                 }
                 renderHistory();
+                // renderLeaderboard call is handled above
                 if(data.recentTrades) renderTicker(data.recentTrades);
-                if(data.leaderboard) renderLeaderboard(data.leaderboard);
 
                 if(data.activePosition) {
                     const uS = data.activePosition.upShares || 0;
