@@ -1,7 +1,7 @@
-<!-- ASDForecast CONTROL PANEL v1.8 // FULL HISTORY OPEN/CLOSE -->
+<!-- ASDForecast CONTROL PANEL v1.8.2 // FIX: History Time Displays Frame Close Time -->
 
-<script src="[https://cdn.tailwindcss.com](https://cdn.tailwindcss.com)"></script>
-<link href="[https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap](https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap)" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 
 <style>
     body { background-color: #0c0c0c; color: #ffedd5; font-family: 'JetBrains Mono', monospace; }
@@ -92,11 +92,11 @@
             <h3 class="text-orange-500 font-bold mb-4 border-b border-orange-900/30 pb-2">MARKET DEPTH</h3>
             <div class="grid grid-cols-2 gap-4">
                 <div class="bg-green-900/20 p-4 rounded border border-green-900/50"> 
-                    <div class="stat-label text-green-500">UP Price</div> <div id="val-up-price" class="text-xl font-bold text-white">0.000</div>
+                    <div class="stat-label text-green-500">UP Price</div> <div id="val-up-price" class="text-xl font-bold text-white">0.000 SOL</div>
                     <div class="stat-label text-green-500 mt-2">Shares</div> <div id="val-up-shares" class="text-xl font-bold text-white">0</div>
                 </div>
                 <div class="bg-red-900/20 p-4 rounded border border-red-900/50"> 
-                    <div class="stat-label text-red-500">DOWN Price</div> <div id="val-down-price" class="text-xl font-bold text-white">0.000</div>
+                    <div class="stat-label text-red-500">DOWN Price</div> <div id="val-down-price" class="text-xl font-bold text-white">0.000 SOL</div>
                     <div class="stat-label text-red-500 mt-2">Shares</div> <div id="val-down-shares" class="text-xl font-bold text-white">0</div>
                 </div>
             </div>
@@ -157,7 +157,7 @@
             <table class="w-full text-xs font-mono text-left">
                 <thead class="text-orange-500 border-b border-orange-900/50 sticky top-0 bg-black">
                     <tr>
-                        <th class="pb-2 pl-2">Time</th>
+                        <th class="pb-2 pl-2">Time (Close)</th>
                         <th class="pb-2">Result</th>
                         <th class="pb-2 text-right">Vol</th>
                         <th class="pb-2 text-right">Winners</th>
@@ -185,7 +185,7 @@
                 <table class="w-full text-xs font-mono text-left">
                     <thead class="text-orange-500 border-b border-orange-900 sticky top-0 bg-[#1a0f0a]">
                         <tr>
-                            <th class="pb-2 pl-2">Time</th>
+                            <th class="pb-2 pl-2">Time (Close)</th>
                             <th class="pb-2">Result</th>
                             <!-- ADDED OPEN/CLOSE -->
                             <th class="pb-2 text-right">Open</th>
@@ -208,13 +208,13 @@
     </div>
 
     <div class="mt-8 text-center text-xs text-gray-600">
-        <p>Backend Connection: <span class="font-mono text-orange-900">[https://asdforecast.onrender.com](https://asdforecast.onrender.com)</span></p>
+        <p>Backend Connection: <span class="font-mono text-orange-900">https://asdforecast.onrender.com</span></p>
     </div>
 
 </div>
 
 <script>
-    const API_URL = '[https://asdforecast.onrender.com/api](https://asdforecast.onrender.com/api)';
+    const API_URL = 'https://asdforecast.onrender.com/api';
     
     let fullHistory = [];
     let cachedAdminPassword = null;
@@ -298,9 +298,10 @@
 
     // --- DATA FETCHING ---
     async function fetchLogs() {
-        if (!cachedAdminPassword) return; 
+        const pwd = cachedAdminPassword;
+        if (!pwd) return; 
         try {
-            const res = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-secret': cachedAdminPassword } });
+            const res = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-secret': pwd } });
             if (res.status === 403) return; 
             const data = await res.json();
             if (data.logs) {
@@ -311,9 +312,10 @@
     }
 
     async function fetchPayouts() {
-        if (!cachedAdminPassword) return; 
+        const pwd = cachedAdminPassword;
+        if (!pwd) return; 
         try {
-            const res = await fetch(`${API_URL}/admin/payouts`, { headers: { 'x-admin-secret': cachedAdminPassword } });
+            const res = await fetch(`${API_URL}/admin/payouts`, { headers: { 'x-admin-secret': pwd } });
             if (res.status === 403) return; 
             const data = await res.json();
             
@@ -339,7 +341,7 @@
                         <td class="py-1 text-gray-400">${time}</td>
                         <td class="py-1 text-green-200">${h.type}</td>
                         <td class="py-1 font-bold">${h.totalAmount}</td>
-                        <td class="py-1"><a href="[https://solscan.io/tx/$](https://solscan.io/tx/$){h.signature}" target="_blank" class="text-blue-400 hover:underline">View ↗</a></td>
+                        <td class="py-1"><a href="https://solscan.io/tx/${h.signature}" target="_blank" class="text-blue-400 hover:underline">View ↗</a></td>
                     </tr>`;
                 }).join('');
             } else {
@@ -365,7 +367,10 @@
 
     function renderFullHistory(data) {
         ui.fullHistoryRows.innerHTML = data.map(f => {
-            const time = new Date(f.time).toLocaleString();
+            // Use EndTime for display in the modal table
+            const timeVal = f.endTime || f.time;
+            const time = new Date(timeVal).toLocaleString();
+            
             let resColor = 'text-gray-400';
             if (f.result === 'UP') resColor = 'text-green-400 font-bold';
             if (f.result === 'DOWN') resColor = 'text-red-400 font-bold';
@@ -445,12 +450,11 @@
             }
 
             if (data.market) {
-                ui.upPrice.innerText = data.market.priceUp.toFixed(4) + " SOL";
-                ui.downPrice.innerText = data.market.priceDown.toFixed(4) + " SOL";
-                
+                // FIXED: Append units to Market Depth
+                ui.upPrice.innerText = `${data.market.priceUp.toFixed(4)} SOL`;
+                ui.downPrice.innerText = `${data.market.priceDown.toFixed(4)} SOL`;
                 const netUp = Math.max(0, data.market.sharesUp - 50);
                 const netDown = Math.max(0, data.market.sharesDown - 50);
-                
                 ui.upShares.innerText = Math.round(netUp).toLocaleString();
                 ui.downShares.innerText = Math.round(netDown).toLocaleString();
             }
@@ -458,7 +462,7 @@
             // Render Small History in Panel
             if (data.history) {
                 ui.historyRows.innerHTML = data.history.slice(0, 3).map(f => {
-                     const time = new Date(f.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                     const time = new Date(f.endTime || f.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
                      let resColor = f.result==='UP'?'text-green-400':(f.result==='DOWN'?'text-red-400':(f.result==='CANCELLED'?'text-red-600 font-bold':(f.result==='PAUSED'?'text-yellow-500 font-bold':'text-gray-400')));
                      return `<tr class="hover:bg-white/5"><td class="py-3 pl-2">${time}</td><td class="py-3 ${resColor}">${f.result}</td><td class="py-3 text-right">${(f.totalSol||0).toFixed(2)}</td><td class="py-3 text-right">${f.winners||0}</td><td class="py-3 text-right">${(f.payout||0).toFixed(2)}</td></tr>`;
                 }).join('');
