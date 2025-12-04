@@ -307,7 +307,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v126.2</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v126.3</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <div id="share-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black/60">
@@ -612,7 +612,16 @@
         } 
     }
     
-    function adjustQty(n) { if(ui.qty.disabled) return; let v = parseInt(ui.qty.value) + n; if(v < 1) v = 1; ui.qty.value = Math.floor(v); updateCosts(); }
+    function adjustQty(n) { 
+        if(ui.qty.disabled) {
+            alert("Cannot adjust quantity while market is paused or calculating results.");
+            return;
+        }
+        let v = parseInt(ui.qty.value) + n; 
+        if(v < 1) v = 1; 
+        ui.qty.value = Math.floor(v); 
+        updateCosts(); 
+    }
     
     // UPDATED: Now performs balance validation and disables buttons
     function updateCosts() { 
@@ -625,14 +634,21 @@
             ui.costUp.innerText = costUp.toFixed(3) + " SOL"; 
             ui.costDown.innerText = costDown.toFixed(3) + " SOL"; 
             
-            // Validation: Check if cost exceeds the user's current balance
+            // Logic to disable input/buttons based on market state
+            const isMarketOpen = !(state.pubKey && !state.isResetting && !state.isCancelled && !state.isPaused && !(state.targetEndTime && state.targetEndTime <= Date.now() + 500));
+
+            // Disable/Enable Quantity Controls (qty input and + / - buttons)
+            ui.qty.disabled = isMarketOpen;
+            ui.btnInc.disabled = isMarketOpen;
+            ui.btnDec.disabled = isMarketOpen;
+
+            // Balance Validation
             const hasUpFunds = costUp <= state.solBalance;
             const hasDownFunds = costDown <= state.solBalance;
             
-            // Disable buttons if out of funds OR if market is paused/resetting
-            const isMarketOpen = !ui.pauseOverlay.classList.contains('hidden');
-            ui.btnUp.disabled = !hasUpFunds || isMarketOpen;
-            ui.btnDown.disabled = !hasDownFunds || isMarketOpen;
+            // Disable Buy Buttons: combines Market State AND Insufficient Funds
+            ui.btnUp.disabled = isMarketOpen || !hasUpFunds;
+            ui.btnDown.disabled = isMarketOpen || !hasDownFunds;
 
             // Visual feedback for insufficient funds
             if (!hasUpFunds) { ui.costUp.classList.add('text-red-500'); ui.costUp.classList.remove('text-green-300'); }
@@ -767,7 +783,7 @@
 
             if (data.isResetting) {
                 ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.netSharesHeader.classList.remove("text-red-500");
-                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                // Disable buy buttons and show overlay
                 ui.pauseOverlay.classList.remove('hidden');
                 ui.statusText.innerText = "RESETTING"; ui.statusText.className = "text-blue-400";
                 if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; }
@@ -775,14 +791,14 @@
             }
             else if (data.isCancelled) {
                 ui.netSharesHeader.innerText = "FRAME CANCELLED"; ui.netSharesHeader.classList.add("text-red-500"); 
-                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                // Disable buy buttons and show overlay
                 ui.pauseOverlay.classList.remove('hidden');
                 ui.statusText.innerText = "CANCELLED"; ui.statusText.className = "text-red-500";
                 if(ui.pauseText) { ui.pauseText.innerText = "FRAME CANCELLED - funds refunded"; ui.pauseText.className = "text-red-500 font-bold text-xl"; }
             }
             else if (data.isPaused) {
                 ui.netSharesHeader.innerText = "MARKET PAUSED"; ui.netSharesHeader.classList.add("text-red-500"); 
-                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                // Disable buy buttons and show overlay
                 ui.pauseOverlay.classList.remove('hidden');
                 ui.statusText.innerText = "PAUSED"; ui.statusText.className = "text-yellow-500";
                 ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-yellow-900/50";
@@ -792,13 +808,13 @@
                 if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) {
                      // Local timer says closed, waiting for backend
                      ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse");
-                     ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                     // Disable buy buttons and show overlay
                      ui.pauseOverlay.classList.remove('hidden');
                      if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; }
                 } else {
                      // OPEN
                      ui.netSharesHeader.innerText = "Net Shares Bought"; ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse");
-                     // Buttons are handled by updateCosts() based on balance now
+                     // Re-enable buy buttons and hide overlay
                      ui.pauseOverlay.classList.add('hidden');
                 }
             }
@@ -968,7 +984,7 @@
                 }
             } catch(e) { console.log("Stats Render Error", e); }
             
-            // CRUCIAL: Re-run costs update after new market data (prices) is fetched
+            // CRUCIAL: Re-run costs update after new market data (prices/status) is fetched
             updateCosts();
 
         } catch(e) {
@@ -977,6 +993,7 @@
             // Removed custom messaging here to let the status indicator default
             if(ui.topStatus) ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-red-900/50 transition-colors duration-500";
             if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; }
+            updateCosts(); // Still need to run this to handle disabling if offline
         } finally {
             // Recursive polling with Jitter (0-400ms)
             const jitter = Math.floor(Math.random() * 400);
