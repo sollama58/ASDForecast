@@ -1,4 +1,4 @@
-<!-- ASDForecast v122.1 // FIX: SENTIMENT METER, PROGRESS BAR & IMAGE LOAD -->
+<!-- ASDForecast v123.0 // UI: UPDATED STATS LABELS -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -187,7 +187,7 @@
                 <!-- HOURLY SENTIMENT METER -->
                 <div class="panel p-6 bg-black/40 border-orange-900/30 border-2">
                     <div class="flex justify-between items-center mb-4">
-                         <h3 class="text-sm font-bold text-orange-400 uppercase tracking-wider">Hourly Crowd Sentiment</h3>
+                         <h3 class="text-sm font-bold text-orange-400 uppercase tracking-wider">Daily Crowd Sentiment</h3>
                          <span class="text-[10px] font-mono text-gray-500" id="sent-timer">Reset: --:--</span>
                     </div>
                     
@@ -214,7 +214,7 @@
                         <span>UP: <span id="val-sent-up" class="text-green-400 font-bold">0</span></span>
                         <span>DOWN: <span id="val-sent-down" class="text-red-400 font-bold">0</span></span>
                     </div>
-                    <p class="text-[9px] text-center mt-3 text-gray-600 font-mono">Vote once per 15 mins. Resets hourly.</p>
+                    <p class="text-[9px] text-center mt-3 text-gray-600 font-mono">Vote once per 15 mins. Resets daily.</p>
                 </div>
 
             </div>
@@ -248,9 +248,11 @@
                             </div>
                             
                             <!-- LAST FRAME PERFORMANCE (UPDATED LAYOUT) -->
-                            <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono">
-                                <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
-                                <div id="last-frame-stats" class="text-orange-200 italic opacity-50">Waiting for close...</div>
+                            <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono flex justify-between items-center gap-2">
+                                <div id="last-frame-stats" class="flex-grow">
+                                    <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
+                                    <div class="text-orange-200 italic opacity-50">Waiting for close...</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -279,12 +281,18 @@
         <!-- STATS -->
         <div class="panel p-4 bg-black/40 mb-8">
             <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider mb-2">Global Damage Report</h3>
+            <!-- 6-Grid Layout for Stats -->
             <div class="grid grid-cols-2 md:grid-cols-3 gap-6 text-center md:text-left">
+                <!-- ROW 1 (Original Stats) -->
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Total Volume</span><span id="global-vol" class="text-xl font-bold font-mono text-white">0.00 SOL</span></div>
-                <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Ash Pile (Fees)</span><span id="global-fees" class="text-xl font-bold font-mono text-red-400">0.00 SOL</span></div>
+                <!-- UPDATE: Label Changed -->
+                <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Fees</span><span id="global-fees" class="text-xl font-bold font-mono text-red-400">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">ASDF Purchased</span><span id="global-asdf" class="text-xl font-bold font-mono text-yellow-400">0 ASDF</span></div>
+                
+                <!-- ROW 2 (New Stats) -->
                 <div>
                     <span class="block text-[10px] text-orange-400 font-mono uppercase">Last Payout</span>
+                    <!-- Link to Solscan -->
                     <a id="link-last-payout" href="https://solscan.io/account/BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy" target="_blank" class="text-xl font-bold font-mono text-white hover:text-orange-400 transition-colors underline decoration-dotted decoration-orange-900" title="Verify on Solscan">--</a>
                 </div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Payouts</span><span id="global-winnings" class="text-xl font-bold font-mono text-green-400">0.00 SOL</span></div>
@@ -321,10 +329,10 @@
                 <div><strong class="text-white block mb-1 text-base border-l-4 border-orange-500 pl-2">3. PRICING FORMULA</strong><p class="mb-2">The system maintains a constant invariant: <code>Price(UP) + Price(DOWN) = 0.1 SOL</code>.</p><div class="bg-black/50 p-3 rounded border border-orange-900/50 font-mono text-xs text-green-400">Share Price = (Liquidity_In_Direction / Total_Liquidity) * 0.1</div><p class="mt-2 text-xs text-gray-500">Note: A small virtual liquidity buffer (50 shares) is applied to both sides at the start of a frame to prevent infinite price swings on the very first bet.</p></div>
                 <div><strong class="text-white block mb-1 text-base border-l-4 border-orange-500 pl-2">4. PAYOUTS & FEES</strong><ul class="list-disc list-inside ml-2 space-y-2 text-orange-100/80 text-xs"><li><strong>THE ASH PILE (FEES):</strong> 5.52% of the Total Volume (all wagers combined) is deducted automatically. This revenue is sent to the Fee Wallet to buy back and burn <strong>$ASDFASDFA</strong>.</li><li><strong>House Reserve:</strong> 0.48% is retained to cover Solana network rent and transaction gas fees.</li><li><strong>The Winner's Pot:</strong> The remaining 94% of the Total Volume is the pot.</li><li><strong>Distribution:</strong> the pot is then distributed to winners divided among them based on how many shares they own, proportional to the total amount of winning shares.</li><li class="text-red-400"><strong>TOTAL MELTDOWN (FLAT MARKET):</strong> If the Open Price and Close Price are identical (0.00% Change), nobody wins. The house burns down. 99% of the pot is sent to the incinerator (Fee Wallet).</li><li class="text-red-400"><strong>THE HEDGE PARADOX:</strong> If you hold an exact equal amount of UP and DOWN shares (a flat position), you have signaled no conviction. The system treats this as a LOSS, regardless of the outcome. You will receive 0 payout.</li></ul></div>
                 <div><strong class="text-white block mb-1 text-base border-l-4 border-orange-500 pl-2">5. SCENARIOS</strong><div class="space-y-3 text-xs mt-2"><div class="bg-black/30 p-3 rounded border-l-2 border-green-500"><span class="text-green-400 font-bold block mb-1">Scenario A: The Crowd Follower (Consensus)</span><p class="opacity-80"><strong>The Situation:</strong> The market is bullish. 90 SOL is on UP, 10 SOL is on DOWN.<br><strong>Your Bet:</strong> You bet 1 SOL on UP.<br><strong>The Outcome:</strong> UP Wins.<br><strong>The Math:</strong> The Pot is ~94 SOL. You own roughly 1.1% of the winning pool.<br><strong>Result:</strong> You receive ~1.04 SOL back. A small, safe 4% profit.</p></div><div class="bg-black/30 p-3 rounded border-l-2 border-yellow-500"><span class="text-yellow-400 font-bold block mb-1">Scenario B: The Contrarian (Longshot)</span><p class="opacity-80"><strong>The Situation:</strong> The market is bullish (90 SOL UP vs 10 SOL DOWN).<br><strong>Your Bet:</strong> You bet 1 SOL on DOWN (The Underdog).<br><strong>The Outcome:</strong> DOWN Wins.<br><strong>The Math:</strong> The Pot is ~94 SOL. You own roughly 10% of the winning pool (since the pool is small).<br><strong>Result:</strong> You receive ~9.40 SOL back. A massive 840% profit for betting against the crowd.</p></div></div></div>
-                <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
+                <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v122.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v123.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -420,6 +428,7 @@
             statActUp: document.getElementById('stat-active-up'), statActDown: document.getElementById('stat-active-down'),
             statPayout: document.getElementById('stat-payout'), lastFrameStats: document.getElementById('last-frame-stats'),
             aboutContent: document.getElementById('about-content'), aboutIcon: document.getElementById('about-icon'),
+            
             // RESTORED IDs
             statGlobalVol: document.getElementById('global-vol'), 
             statGlobalFees: document.getElementById('global-fees'), 
@@ -465,11 +474,12 @@
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
 
-        // Fetch Images immediately (FIXED TO ASSIGN TO STATE)
+        // Fetch Images immediately
         fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
         fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
-        fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image) { state.images.sentUp = d.image; } });
-        fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image) { state.images.sentDown = d.image; } });
+        // NEW SENTIMENT IMAGES (Fixed to assign to state)
+        fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentUp) { ui.imgSentUp.src = d.image; state.images.sentUp = d.image; } });
+        fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentDown) { ui.imgSentDown.src = d.image; state.images.sentDown = d.image; } });
 
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
@@ -615,7 +625,8 @@
                  const vol = document.getElementById('stat-volume').innerText;
                  let totalWon = 0; Object.values(state.userLog).forEach(f => { if(f.payoutAmount) totalWon += f.payoutAmount; });
                  ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(40, 120, 720, 240); ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif"; ctx.lineWidth = 4;
-                 ctx.strokeText(`WIN RATE: ${rate}`, 80, 180); ctx.fillText(`WIN RATE: ${rate}`, 80, 180); ctx.strokeText(`W/L:      ${wins}/${total-wins}`, 80, 230); ctx.fillText(`W/L:      ${wins}/${total-wins}`, 80, 230);
+                 ctx.strokeText(`WIN RATE: ${rate}`, 80, 180); ctx.fillText(`WIN RATE: ${rate}`, 80, 180);
+                 ctx.strokeText(`W/L:      ${wins}/${total-wins}`, 80, 230); ctx.fillText(`W/L:      ${wins}/${total-wins}`, 80, 230);
                  ctx.strokeText(`VOLUME:   ${vol}`, 80, 280); ctx.fillText(`VOLUME:   ${vol}`, 80, 280);
                  ctx.fillStyle = "#4ade80"; ctx.strokeText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330); ctx.fillText(`WON:      ${totalWon.toFixed(2)} SOL`, 80, 330);
              }
@@ -639,6 +650,7 @@
 
     function renderHistory() {
         if (!state.fullHistory || state.fullHistory.length === 0) { ui.historyRows.innerHTML = '<tr><td colspan="6" class="py-2 italic opacity-50">Waiting for first frame close...</td></tr>'; return; }
+        const now = Date.now();
         const validHistory = state.fullHistory.filter(f => (f.endTime || 0) <= Date.now()); const dataToShow = validHistory.slice(0, 3);
         ui.historyRows.innerHTML = dataToShow.map(f => {
             const timeVal = f.endTime ? f.endTime : f.time; const time = new Date(timeVal).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
@@ -661,9 +673,6 @@
     }
 
     async function poll() {
-        if (document.hidden) return;
-        if (!ui || !ui.price) return;
-
         try {
             let url = `${API_URL}/state`; if(state.pubKey) url += `?user=${state.pubKey.toString()}`;
             const res = await fetch(url); if(!res.ok) throw new Error(res.statusText); const data = await res.json();
@@ -714,20 +723,21 @@
                 else if (sDown > sUp) { ui.sentBarFill.style.backgroundColor = '#ef4444'; }
                 else { ui.sentBarFill.style.backgroundColor = '#fb923c'; }
 
+                // Calc Time
                 const now = Date.now();
                 if (data.hourlySentiment.nextReset > now) {
                      const totalSeconds = Math.floor((data.hourlySentiment.nextReset - now) / 1000);
-                     const mins = Math.floor(totalSeconds / 60);
-                     const secs = totalSeconds % 60;
-                     ui.sentTimer.innerText = `Reset: ${mins}m ${secs}s`;
+                     const hours = Math.floor(totalSeconds / 3600);
+                     const mins = Math.floor((totalSeconds % 3600) / 60);
+                     ui.sentTimer.innerText = `Reset: ${hours}h ${mins}m`;
                 } else {
                      ui.sentTimer.innerText = `Resetting...`;
                 }
             }
             
             // FIX: Image Population
-            if (state.images.sentUp) ui.imgSentUp.src = state.images.sentUp;
-            if (state.images.sentDown) ui.imgSentDown.src = state.images.sentDown;
+            if (state.images.sentUp) ui.imgSentUp.src = state.images.sentUp; else ui.imgSentUp.style.display='none';
+            if (state.images.sentDown) ui.imgSentDown.src = state.images.sentDown; else ui.imgSentDown.style.display='none';
 
 
             if(data.userStats) {

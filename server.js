@@ -32,7 +32,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; 
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "142.0"; // UPDATE: Daily Sentiment Persistence & ASDF Fix
+const BACKEND_VERSION = "142.1"; // UPDATE: Robust ASDF Tracking
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- LOGGING ---
@@ -56,7 +56,7 @@ function isValidSignature(signature) { return typeof signature === 'string' && S
 const betLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 10, message: { error: "RATE_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
 const stateLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 120, message: { error: "POLLING_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
 const voteLimiter = rateLimit({ 
-    windowMs: 3600 * 1000, // 1 hour per IP limit (Backup/Safety)
+    windowMs: 3600 * 1000, // 1 hour
     max: 1, 
     message: { error: "IP_COOLDOWN_ACTIVE" }, 
     standardHeaders: true, 
@@ -81,7 +81,7 @@ const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json');
 const PAYOUT_HISTORY_FILE = path.join(DATA_DIR, 'payout_history.json');
 const PAYOUT_MASTER_LOG = path.join(DATA_DIR, 'payout_master.log');
 const FAILED_REFUNDS_FILE = path.join(DATA_DIR, 'failed_refunds.json');
-const SENTIMENT_VOTES_FILE = path.join(DATA_DIR, 'sentiment_votes.json'); // NEW: Persistent vote map file
+const SENTIMENT_VOTES_FILE = path.join(DATA_DIR, 'sentiment_votes.json');
 
 log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
@@ -145,13 +145,14 @@ let cachedPublicState = null;
 let sentimentVotes = new Map(); 
 let isProcessingQueue = false; 
 
-function getNextDayTimestamp() { // MODIFIED: Next Day Reset
+function getNextDayTimestamp() {
     const now = new Date();
     now.setDate(now.getDate() + 1);
-    now.setHours(0, 0, 0, 0); // Reset at midnight EST
+    now.setHours(0, 0, 0, 0); 
     return now.getTime();
 }
 
+// --- UTILITY FUNCTION ---
 function getCurrentWindowStart() {
     const now = new Date();
     const minutes = Math.floor(now.getMinutes() / 15) * 15;
@@ -180,6 +181,8 @@ function loadGlobalState() {
             globalStats = { ...globalStats, ...loaded };
             if(!globalStats.totalWinnings) globalStats.totalWinnings = 0;
             if(!globalStats.totalLifetimeUsers) globalStats.totalLifetimeUsers = 0;
+            if(!globalStats.totalFees) globalStats.totalFees = 0;
+            if(!globalStats.totalVolume) globalStats.totalVolume = 0;
         }
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
@@ -187,8 +190,6 @@ function loadGlobalState() {
             lines.slice(-5000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
         }
         if (fsSync.existsSync(PAYOUT_HISTORY_FILE)) payoutHistory = JSON.parse(fsSync.readFileSync(PAYOUT_HISTORY_FILE));
-        
-        // NEW: Load Sentiment Votes Map
         if (fsSync.existsSync(SENTIMENT_VOTES_FILE)) {
             const voteArray = JSON.parse(fsSync.readFileSync(SENTIMENT_VOTES_FILE));
             sentimentVotes = new Map(voteArray);
@@ -201,7 +202,6 @@ function loadGlobalState() {
             if (!gameState.broadcast) gameState.broadcast = { message: "", isActive: false };
             if (!gameState.vaultStartBalance) gameState.vaultStartBalance = 0; 
             
-            // Re-init sentiment if missing or incorrectly hourly (now daily)
             if (!gameState.hourlySentiment || !gameState.hourlySentiment.nextReset) {
                 gameState.hourlySentiment = { up: 0, down: 0, nextReset: getNextDayTimestamp() };
             }
@@ -241,8 +241,6 @@ async function saveSystemState() {
         lastPriceTimestamp: gameState.lastPriceTimestamp, broadcast: gameState.broadcast, vaultStartBalance: gameState.vaultStartBalance, hourlySentiment: gameState.hourlySentiment
     });
     await atomicWrite(STATS_FILE, globalStats);
-    
-    // NEW: Save Sentiment Votes Map
     await atomicWrite(SENTIMENT_VOTES_FILE, Array.from(sentimentVotes.entries()));
 }
 
@@ -263,27 +261,66 @@ async function saveUser(pubKey, data) {
     } catch (e) {}
 }
 
+// UPDATED: Robust ASDF History Fetcher
 async function updateASDFPurchases() {
     const connection = new Connection(SOLANA_NETWORK); 
     try {
-        const options = { limit: 20 };
-        if (globalStats.lastASDFSignature) options.until = globalStats.lastASDFSignature;
-        const signaturesDetails = await connection.getSignaturesForAddress(FEE_WALLET, options);
-        if (signaturesDetails.length === 0) return;
-        globalStats.lastASDFSignature = signaturesDetails[0].signature;
-        const txs = await connection.getParsedTransactions(signaturesDetails.map(s => s.signature), { maxSupportedTransactionVersion: 0 });
-        let newPurchasedAmount = 0;
-        for (const tx of txs) {
-            if (!tx || !tx.meta) continue;
-            const preBal = tx.meta.preTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
-            const postBal = tx.meta.postTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
-            const preAmount = preBal?.uiTokenAmount.uiAmount || 0;
-            const postAmount = postBal?.uiTokenAmount.uiAmount || 0;
-            if (postAmount > preAmount) newPurchasedAmount += (postAmount - preAmount);
+        let currentSignature = null;
+        let allNewSignatures = [];
+        const options = { limit: 100 }; // Fetch up to 100 at a time
+        
+        if (globalStats.lastASDFSignature) {
+            options.until = globalStats.lastASDFSignature;
         }
+
+        // Fetch signatures until we hit the last known one or run out (max 5 pages safety)
+        for (let i = 0; i < 5; i++) {
+             if (currentSignature) options.before = currentSignature;
+             
+             const signaturesDetails = await connection.getSignaturesForAddress(FEE_WALLET, options);
+             if (signaturesDetails.length === 0) break;
+             
+             allNewSignatures.push(...signaturesDetails);
+             currentSignature = signaturesDetails[signaturesDetails.length - 1].signature;
+             
+             // If we hit the 'until' target (implied by library, but explicit check safe)
+             if (globalStats.lastASDFSignature && signaturesDetails.some(s => s.signature === globalStats.lastASDFSignature)) break;
+        }
+
+        if (allNewSignatures.length === 0) return;
+
+        // Update last known to the most recent one found
+        globalStats.lastASDFSignature = allNewSignatures[0].signature;
+
+        // Process transactions in chunks of 50
+        const BATCH_SIZE = 50;
+        let newPurchasedAmount = 0;
+
+        for (let i = 0; i < allNewSignatures.length; i += BATCH_SIZE) {
+            const batchSigs = allNewSignatures.slice(i, i + BATCH_SIZE).map(s => s.signature);
+            const txs = await connection.getParsedTransactions(batchSigs, { maxSupportedTransactionVersion: 0 });
+            
+            for (const tx of txs) {
+                if (!tx || !tx.meta) continue;
+                // Calculate token balance change for ASDF
+                const preBal = tx.meta.preTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
+                const postBal = tx.meta.postTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
+                
+                const preAmount = preBal?.uiTokenAmount.uiAmount || 0;
+                const postAmount = postBal?.uiTokenAmount.uiAmount || 0;
+                
+                if (postAmount > preAmount) {
+                    newPurchasedAmount += (postAmount - preAmount);
+                }
+            }
+        }
+
         if (newPurchasedAmount > 0) {
              globalStats.totalASDF += newPurchasedAmount;
+             log(`> [ASDF] Added +${newPurchasedAmount.toFixed(2)} ASDF from ${allNewSignatures.length} txs`, "ASDF");
+             await atomicWrite(STATS_FILE, globalStats);
         }
+
     } catch (e) { log(`> [ASDF] History Check Failed: ${e.message}`, "ERR"); }
 }
 
@@ -483,6 +520,7 @@ async function processRefunds(frameId, bets) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
         queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch, retries: 0 }); 
     }
+
     const release = await payoutMutex.acquire();
     try {
         let existingQueue = [];
@@ -551,7 +589,6 @@ async function closeFrame(closePrice, closeTime) {
 
         let winnerCount = 0;
         let payoutTotal = 0;
-        // FIX: userPositions hoisted to avoid ReferenceError below
         const userPositions = {}; 
         
         if (result !== "FLAT") {
