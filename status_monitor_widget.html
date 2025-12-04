@@ -1,0 +1,288 @@
+<!-- ASDForecast Status Monitor v1.2 // REVISED PRICE/TIMER LAYOUT -->
+
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+    /* THEME: Terminal / Fire */
+    body {
+        font-family: 'Comic Neue', cursive; 
+        background-color: #0c0c0c; 
+        color: #ffedd5;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+    .monitor-container {
+        width: 100%;
+        max-width: 800px;
+        padding: 20px;
+    }
+
+    .panel {
+        background: rgba(20, 10, 5, 0.8);
+        border: 2px solid #ea580c;
+        border-radius: 8px;
+        box-shadow: 4px 4px 0 #9a3412;
+        margin-bottom: 20px;
+    }
+
+    .bar-container { height: 24px; background: #2a1005; border-radius: 12px; overflow: hidden; border: 1px solid #7c2d12; display: flex; }
+    .bar-fill { height: 100%; transition: width 0.5s ease; }
+    .bg-up { background: #22c55e; }
+    .bg-down { background: #ef4444; }
+
+    /* Status Indicator Pulse */
+    .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
+    .status-online { background-color: #4ade80; box-shadow: 0 0 8px #4ade80; }
+    .status-offline { background-color: #ef4444; }
+</style>
+
+<div class="monitor-container">
+    
+    <div class="flex justify-between items-center mb-6 border-b border-orange-900/50 pb-4">
+        <h1 class="text-2xl font-bold text-orange-500">ASDForecast // MONITOR</h1>
+        <div class="text-xs font-mono text-gray-500 flex items-center">
+            <span id="status-dot" class="status-dot status-offline"></span>
+            <span id="connection-status">CONNECTING...</span>
+        </div>
+    </div>
+
+    <!-- PRICE & TIME PANEL -->
+    <div class="panel p-6">
+        <div class="flex flex-col gap-4">
+            
+            <!-- ROW 1: PRICE DATA -->
+            <div>
+                <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider">SOL/USD (15m Change)</h3>
+                <div class="flex items-baseline gap-3 mt-1">
+                    <span id="price" class="text-6xl font-mono font-bold text-white">$---.--</span>
+                    <span id="change" class="text-3xl font-mono font-bold text-gray-500">--</span>
+                </div>
+            </div>
+
+            <!-- ROW 2: TIME REMAINING (MOVED HERE) -->
+            <div>
+                <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider mb-1">Time Remaining</h3>
+                <div id="timer" class="text-5xl font-mono font-bold text-yellow-400">--:--</div>
+            </div>
+
+            <!-- ROW 3: FRAME TIMES -->
+            <div class="text-xs font-mono text-orange-500/70 flex gap-4 border-t border-orange-900/50 pt-2 mt-2">
+                <span>OPEN: <span id="frame-start" class="text-white">--:--</span></span>
+                <span>CLOSE: <span id="frame-end" class="text-white">--:--</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- SENTIMENT PANEL -->
+    <div class="panel p-6 bg-black/20 relative">
+        <div class="flex justify-between items-end mb-2">
+            <h3 class="text-lg font-bold text-white">Net Shares Bought</h3>
+            <div class="text-xs text-orange-500/70 font-mono">Active Wallets: <span id="active-users" class="text-white font-bold">0</span></div>
+        </div>
+
+        <div class="flex justify-between text-sm font-bold font-mono text-white mb-1">
+            <span class="text-green-400">UP: <span id="lbl-shares-up">0</span></span>
+            <span class="text-red-400">DOWN: <span id="lbl-shares-down">0</span></span>
+        </div>
+        
+        <div class="bar-container mb-4">
+            <div id="bar-up" class="bar-fill bg-up" style="width: 50%"></div>
+            <div id="bar-down" class="bar-fill bg-down" style="width: 50%"></div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 text-center text-xs font-mono text-orange-500/80">
+            <div>
+                <div class="text-sm font-bold text-white">Price: <span id="lbl-price-up">0.050</span> SOL</div>
+                <div class="flex justify-center gap-2 mt-1 text-[10px] opacity-70">
+                    <span>1m: <span id="up-1m">0%</span></span>
+                    <span>5m: <span id="up-5m">0%</span></span>
+                </div>
+            </div>
+            <div>
+                <div class="text-sm font-bold text-white">Price: <span id="lbl-price-down">0.050</span> SOL</div>
+                <div class="flex justify-center gap-2 mt-1 text-[10px] opacity-70">
+                    <span>1m: <span id="down-1m">0%</span></span>
+                    <span>5m: <span id="down-5m">0%</span></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-6 flex justify-center items-center gap-3">
+            <div class="bg-black/40 border border-orange-900/30 rounded px-6 py-2 text-center shadow-inner">
+                <span class="text-[10px] text-orange-400 uppercase block tracking-widest opacity-70 mb-1">Current Frame Pot</span>
+                <span id="current-pot" class="text-2xl font-mono font-bold text-white">0.000 SOL</span>
+            </div>
+            <div class="text-sm text-orange-500/70 font-mono" id="frame-users-container">
+                (👤 <span id="frame-users">0</span>)
+            </div>
+        </div>
+    </div>
+
+    <div class="text-center text-[10px] text-gray-600 font-mono mt-4">
+        Backend: <span id="backend-version">v---</span> | Status Monitor v1.2
+    </div>
+
+</div>
+
+<script>
+    const API_URL = 'https://asdforecast.onrender.com/api';
+    
+    let state = { prices: { up: 0.05, down: 0.05 }, targetEndTime: null, isResetting: false };
+    let ui = {};
+    let pollTimeout = null;
+
+    window.addEventListener('load', () => {
+        ui = {
+            price: document.getElementById('price'), 
+            change: document.getElementById('change'), 
+            timer: document.getElementById('timer'),
+            frameStart: document.getElementById('frame-start'), 
+            frameEnd: document.getElementById('frame-end'),
+            barUp: document.getElementById('bar-up'), 
+            barDown: document.getElementById('bar-down'),
+            lblSharesUp: document.getElementById('lbl-shares-up'), 
+            lblSharesDown: document.getElementById('lbl-shares-down'),
+            lblPriceUp: document.getElementById('lbl-price-up'), 
+            lblPriceDown: document.getElementById('lbl-price-down'),
+            up1m: document.getElementById('up-1m'), 
+            up5m: document.getElementById('up-5m'), 
+            down1m: document.getElementById('down-1m'), 
+            down5m: document.getElementById('down-5m'),
+            currentPot: document.getElementById('current-pot'),
+            activeUsers: document.getElementById('active-users'),
+            backendVersion: document.getElementById('backend-version'),
+            statusDot: document.getElementById('status-dot'),
+            connStatus: document.getElementById('connection-status'),
+            frameUsers: document.getElementById('frame-users')
+        };
+
+        // Page Visibility Optimization
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (pollTimeout) { clearTimeout(pollTimeout); pollTimeout = null; }
+            } else {
+                poll(); 
+            }
+        });
+
+        // Start Loop
+        poll();
+        setInterval(updateTimer, 1000);
+    });
+
+    function updateTimer() {
+        if (state.isResetting) { 
+            ui.timer.innerText = "RESET"; 
+            ui.timer.className = "text-5xl font-mono font-bold text-blue-400 animate-pulse mt-1";
+            return; 
+        }
+        
+        // Local Lockdown check
+        if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { 
+            ui.timer.innerText = "00:00"; 
+            return; 
+        }
+
+        if (!state.targetEndTime) {
+            ui.timer.innerText = "--:--";
+            return;
+        }
+
+        ui.timer.className = "text-5xl font-mono font-bold text-yellow-400"; // Removed mt-1
+        const now = Date.now();
+        let diff = state.targetEndTime - now;
+        if (diff < 0) diff = 0;
+        
+        const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const s = Math.floor((diff % (1000 * 60)) / 1000);
+        ui.timer.innerText = `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function formatChange(el, val) { 
+        if (!val) val = 0; 
+        const sign = val >= 0 ? '+' : ''; 
+        const color = val > 0 ? 'text-green-400' : (val < 0 ? 'text-red-400' : 'text-gray-500'); 
+        el.innerHTML = `<span class="${color}">${sign}${val.toFixed(2)}%</span>`; 
+    }
+
+    async function poll() {
+        if (document.hidden) return;
+
+        try {
+            const res = await fetch(`${API_URL}/state`);
+            if(!res.ok) throw new Error("Fetch Error");
+            const data = await res.json();
+
+            // Online Status
+            ui.statusDot.className = "status-dot status-online";
+            ui.connStatus.innerText = "ONLINE";
+            ui.connStatus.className = "text-green-500 font-bold";
+            if(data.backendVersion) ui.backendVersion.innerText = `v${data.backendVersion}`;
+
+            state.isResetting = data.isResetting;
+
+            // Market Data
+            if (data.market) {
+                const nU = Math.max(0, data.market.sharesUp - 50);
+                const nD = Math.max(0, data.market.sharesDown - 50);
+                const total = nU + nD || 1;
+
+                ui.lblSharesUp.innerText = nU.toFixed(0);
+                ui.lblSharesDown.innerText = nD.toFixed(0);
+                
+                ui.barUp.style.width = `${(nU/total)*100}%`; 
+                ui.barDown.style.width = `${(nD/total)*100}%`;
+                
+                ui.lblPriceUp.innerText = data.market.priceUp.toFixed(3);
+                ui.lblPriceDown.innerText = data.market.priceDown.toFixed(3);
+
+                if(data.market.changes) {
+                    formatChange(ui.up1m, data.market.changes.up1m);
+                    formatChange(ui.up5m, data.market.changes.up5m);
+                    formatChange(ui.down1m, data.market.changes.down1m);
+                    formatChange(ui.down5m, data.market.changes.down5m);
+                }
+            }
+
+            // Price & Timer Data
+            ui.price.innerText = `$${data.price.toFixed(2)}`;
+            const diff = data.price - data.openPrice;
+            const color = diff >= 0 ? 'text-green-400' : 'text-red-500';
+            ui.change.innerHTML = `<span class="${color}">${diff>=0?'+':''}${diff.toFixed(2)}</span>`;
+
+            if(data.candleStartTime) {
+                 ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                 ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                 state.targetEndTime = data.candleEndTime;
+            }
+
+            if(data.currentVolume !== undefined) ui.currentPot.innerText = `${data.currentVolume.toFixed(3)} SOL`;
+            
+            // UPDATE: Fill active users count
+            if(data.uniqueUsers !== undefined) {
+                ui.activeUsers.innerText = data.uniqueUsers;
+                ui.frameUsers.innerText = data.uniqueUsers;
+            }
+
+        } catch (e) {
+            ui.statusDot.className = "status-dot status-offline";
+            ui.connStatus.innerText = "DISCONNECTED";
+            ui.connStatus.className = "text-red-500 font-bold";
+        } finally {
+            // Jittered Polling (2s + 0-400ms random delay)
+            const jitter = Math.floor(Math.random() * 400);
+            pollTimeout = setTimeout(poll, 2000 + jitter);
+        }
+    }
+</script>

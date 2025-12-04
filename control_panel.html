@@ -8,14 +8,35 @@
     .panel { background: #1a0f0a; border: 2px solid #7c2d12; border-radius: 8px; padding: 20px; box-shadow: 4px 4px 0 #9a3412; }
     .stat-label { color: #fb923c; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
     .stat-value { font-size: 1.5rem; font-weight: bold; color: #fff; }
-    .history-scroll { max-height: 500px; overflow-y: auto; }
+    .history-scroll { max-height: 400px; overflow-y: auto; }
     .history-scroll::-webkit-scrollbar { width: 6px; }
     .history-scroll::-webkit-scrollbar-thumb { background: #ea580c; border-radius: 3px; }
+    
+    /* DEBUG LOG STYLE */
+    #debug-log-container {
+        height: 200px;
+        overflow-y: auto;
+        font-size: 10px;
+        background-color: #000;
+        border: 1px solid #333;
+        padding: 10px;
+        color: #0f0;
+        white-space: pre-wrap;
+    }
+    #debug-log-container::-webkit-scrollbar { width: 6px; }
+    #debug-log-container::-webkit-scrollbar-thumb { background: #333; }
+
     .blink { animation: blink 1s infinite; }
     @keyframes blink { 50% { opacity: 0.5; } }
+
+    /* MODAL STYLE */
+    .modal-backdrop {
+        background: rgba(0, 0, 0, 0.8);
+        backdrop-filter: blur(4px);
+    }
 </style>
 
-<div class="max-w-6xl mx-auto p-6">
+<div class="max-w-7xl mx-auto p-6">
     
     <!-- HEADER -->
     <div class="flex flex-col md:flex-row justify-between items-center mb-8 border-b border-orange-900 pb-4 gap-4">
@@ -25,6 +46,13 @@
         </div>
         
         <div class="flex items-center gap-6">
+
+            <!-- BROADCAST CONTROLS -->
+            <div class="flex items-center gap-2 bg-gray-900 p-2 rounded border border-gray-700">
+                <input type="text" id="broadcast-msg" placeholder="Broadcast Message..." class="bg-black text-white text-xs p-2 rounded border border-gray-600 w-48">
+                <button onclick="updateBroadcast(true)" class="bg-blue-900 border border-blue-500 text-blue-200 px-3 py-1 rounded text-xs font-bold hover:bg-blue-600">ON</button>
+                <button onclick="updateBroadcast(false)" class="bg-gray-800 border border-gray-600 text-gray-400 px-3 py-1 rounded text-xs font-bold hover:bg-gray-700">OFF</button>
+            </div>
             
             <!-- PAUSE CONTROLS -->
             <div class="flex items-center gap-3 bg-gray-900 p-2 rounded border border-gray-700">
@@ -39,7 +67,7 @@
 
             <!-- EMERGENCY CANCEL -->
             <button onclick="cancelFrame()" class="bg-red-900 border border-red-500 text-red-200 px-4 py-2 rounded text-xs font-bold hover:bg-red-600 hover:text-white transition-colors uppercase">
-                ⚠️ Cancel & Refund
+                ⚠️ Cancel
             </button>
 
             <!-- LOTTERY DRAW -->
@@ -92,47 +120,120 @@
         <div class="panel border-green-900/50">
             <h3 class="text-green-500 font-bold mb-4 border-b border-green-900/30 pb-2">UP POOL 📈</h3>
             <div class="grid grid-cols-2 gap-4">
-                <div> <div class="stat-label text-green-700">Share Price</div> <div id="val-up-price" class="text-xl font-bold text-green-400">0.000 SOL</div> </div>
-                <div> <div class="stat-label text-green-700">Net Shares</div> <div id="val-up-shares" class="text-xl font-bold text-white">0</div> </div>
+                <div class="bg-green-900/20 p-4 rounded border border-green-900/50"> 
+                    <div class="stat-label text-green-500">UP Price</div> <div id="val-up-price" class="text-xl font-bold text-white">0.000 SOL</div>
+                    <div class="stat-label text-green-500 mt-2">Shares</div> <div id="val-up-shares" class="text-xl font-bold text-white">0</div>
+                </div>
+                <div class="bg-red-900/20 p-4 rounded border border-red-900/50"> 
+                    <div class="stat-label text-red-500">DOWN Price</div> <div id="val-down-price" class="text-xl font-bold text-white">0.000 SOL</div>
+                    <div class="stat-label text-red-500 mt-2">Shares</div> <div id="val-down-shares" class="text-xl font-bold text-white">0</div>
+                </div>
             </div>
         </div>
-        <!-- DOWN SIDE -->
-        <div class="panel border-red-900/50">
-            <h3 class="text-red-500 font-bold mb-4 border-b border-red-900/30 pb-2">DOWN POOL 🔥</h3>
-            <div class="grid grid-cols-2 gap-4">
-                <div> <div class="stat-label text-red-700">Share Price</div> <div id="val-down-price" class="text-xl font-bold text-red-400">0.000 SOL</div> </div>
-                <div> <div class="stat-label text-red-700">Net Shares</div> <div id="val-down-shares" class="text-xl font-bold text-white">0</div> </div>
+        
+        <!-- LOGS PANEL -->
+        <div class="panel bg-black/40 flex flex-col">
+            <div class="flex justify-between items-center mb-2">
+                <h3 class="text-sm font-bold text-white">Live Debug Logs</h3>
+                <span class="text-[10px] text-gray-500">Auto-scrolling</span>
+            </div>
+            <div id="debug-log-container" class="flex-grow">Waiting for logs...</div>
+        </div>
+    </div>
+
+    <!-- PAYOUT MONITOR SECTION -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        <!-- ACTIVE QUEUE -->
+        <div class="panel bg-black/40">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-yellow-500">Active Payout Queue</h3>
+                <span id="queue-count" class="text-xs text-yellow-600 font-bold">0 Batches</span>
+            </div>
+            <div class="history-scroll h-64 border border-yellow-900/30 rounded bg-black/20 p-2">
+                <table class="w-full text-xs font-mono text-left">
+                    <thead class="text-gray-500 border-b border-gray-800">
+                        <tr><th class="pb-2">Type</th><th class="pb-2">Recipients</th><th class="pb-2">Retries</th></tr>
+                    </thead>
+                    <tbody id="queue-rows" class="text-gray-300"><tr><td colspan="3" class="py-2 text-center italic opacity-50">Queue Empty</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- PAYOUT HISTORY -->
+        <div class="panel bg-black/40">
+             <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-green-500">Payout History</h3>
+                <button onclick="fetchPayouts()" class="text-xs text-green-600 hover:text-white">[ REFRESH ]</button>
+            </div>
+            <div class="history-scroll h-64 border border-green-900/30 rounded bg-black/20 p-2">
+                <table class="w-full text-xs font-mono text-left">
+                    <thead class="text-gray-500 border-b border-gray-800">
+                        <tr><th class="pb-2">Time</th><th class="pb-2">Type</th><th class="pb-2">Amt (SOL)</th><th class="pb-2">Tx</th></tr>
+                    </thead>
+                    <tbody id="payout-history-rows" class="text-gray-300"><tr><td colspan="4" class="py-2 text-center italic opacity-50">No History</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>
 
-    <!-- HISTORY PANEL -->
+    <!-- FRAME HISTORY PANEL -->
     <div class="panel bg-black/40">
         <div class="flex justify-between items-center mb-4">
             <h3 class="text-lg font-bold text-white">Frame History</h3>
+            <button onclick="openFullHistory()" class="text-xs bg-orange-900 text-orange-200 px-3 py-1 rounded hover:bg-orange-800 font-bold">VIEW ALL ⤢</button>
         </div>
         <div id="history-container" class="history-scroll">
             <table class="w-full text-xs font-mono text-left">
                 <thead class="text-orange-500 border-b border-orange-900/50 sticky top-0 bg-black">
                     <tr>
-                        <th class="pb-2 pl-2">Time</th>
+                        <th class="pb-2 pl-2">Time (Close)</th>
                         <th class="pb-2">Result</th>
                         <th class="pb-2 text-right">Vol</th>
                         <th class="pb-2 text-right">Winners</th>
                         <th class="pb-2 text-right">Payout</th>
-                        <th class="pb-2 text-center">Action</th>
                     </tr>
                 </thead>
                 <tbody id="history-rows" class="text-orange-200/80 divide-y divide-orange-900/20">
-                    <tr><td colspan="6" class="py-4 text-center italic opacity-50">Loading history...</td></tr>
+                    <tr><td colspan="5" class="py-4 text-center italic opacity-50">Loading history...</td></tr>
                 </tbody>
             </table>
         </div>
+    </div>
 
-        <!-- EXPAND BUTTON -->
-        <button id="btn-expand-history" onclick="toggleHistory()" class="w-full py-3 text-xs text-orange-500/50 hover:text-orange-500 hover:bg-orange-900/20 mt-2 font-mono border-t border-dashed border-orange-900/30 transition-colors hidden">
-            [ + ] EXPAND FULL HISTORY
-        </button>
+    <!-- FULL HISTORY MODAL (UPDATED V1.8: ADDED OPEN/CLOSE) -->
+    <div id="full-history-modal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center">
+        <div class="bg-[#1a0f0a] border-2 border-orange-600 rounded-lg w-11/12 h-5/6 max-w-6xl flex flex-col shadow-2xl">
+            <div class="p-4 border-b border-orange-900 flex justify-between items-center bg-black/50">
+                <h2 class="text-xl font-bold text-white">FULL FRAME HISTORY</h2>
+                <div class="flex gap-4">
+                    <input type="text" id="history-search" placeholder="Search ID or Result..." class="bg-black text-white text-xs p-2 rounded border border-gray-700" onkeyup="filterHistory()">
+                    <button onclick="document.getElementById('full-history-modal').classList.add('hidden')" class="text-gray-400 hover:text-white text-xl">✕</button>
+                </div>
+            </div>
+            <div class="flex-grow overflow-y-auto p-4" id="full-history-content">
+                <table class="w-full text-xs font-mono text-left">
+                    <thead class="text-orange-500 border-b border-orange-900 sticky top-0 bg-[#1a0f0a]">
+                        <tr>
+                            <th class="pb-2 pl-2">Time (Close)</th>
+                            <th class="pb-2">Result</th>
+                            <!-- ADDED OPEN/CLOSE -->
+                            <th class="pb-2 text-right">Open</th>
+                            <th class="pb-2 text-right">Close</th>
+                            
+                            <th class="pb-2 text-right">Vol</th>
+                            <th class="pb-2 text-right">Fee</th>
+                            <th class="pb-2 text-right">Upkeep</th>
+                            <th class="pb-2 text-right">Users</th>
+                            <th class="pb-2 text-right">Payout</th>
+                            <th class="pb-2 text-right">Vault Δ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="full-history-rows" class="text-orange-200/80 divide-y divide-orange-900/20">
+                        <!-- Populated via JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <div class="mt-8 text-center text-xs text-gray-600">
@@ -143,10 +244,11 @@
 
 <script>
     const API_URL = 'https://asdforecast.onrender.com/api';
-    const HOUSE_PUBKEY = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
     
     let fullHistory = [];
-    let isHistoryExpanded = false;
+    let cachedAdminPassword = null;
+    let isLogAutoScroll = true;
+    let allFramesData = [];
 
     const ui = {
         statusDot: document.getElementById('status-dot'),
@@ -160,6 +262,11 @@
         upShares: document.getElementById('val-up-shares'),
         downPrice: document.getElementById('val-down-price'),
         downShares: document.getElementById('val-down-shares'),
+        broadcastMsg: document.getElementById('broadcast-msg'),
+        logsContainer: document.getElementById('debug-log-container'),
+        queueRows: document.getElementById('queue-rows'),
+        queueCount: document.getElementById('queue-count'),
+        payoutHistoryRows: document.getElementById('payout-history-rows'),
         historyRows: document.getElementById('history-rows'),
         historyContainer: document.getElementById('history-container'),
         btnExpand: document.getElementById('btn-expand-history'),
@@ -170,65 +277,17 @@
         lotteryPrize: document.getElementById('val-lottery-prize')
     };
 
-    function toggleHistory() {
-        isHistoryExpanded = !isHistoryExpanded;
-        if (isHistoryExpanded) {
-            ui.btnExpand.innerText = "[ - ] COLLAPSE HISTORY";
-            ui.historyContainer.classList.remove('history-collapsed');
-            ui.historyContainer.classList.add('history-scroll');
-        } else {
-            ui.btnExpand.innerText = "[ + ] EXPAND FULL HISTORY";
-            ui.historyContainer.classList.remove('history-scroll');
-        }
-        renderHistory();
-    }
-
-    function renderHistory() {
-        if (!fullHistory || fullHistory.length === 0) {
-            ui.historyRows.innerHTML = '<tr><td colspan="6" class="py-4 text-center italic opacity-50">No history available.</td></tr>';
-            return;
-        }
-
-        const dataToShow = isHistoryExpanded ? fullHistory : fullHistory.slice(0, 3);
-
-        ui.historyRows.innerHTML = dataToShow.map(f => {
-            const time = new Date(f.time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit' });
-            
-            let resColor = 'text-gray-400';
-            if (f.result === 'UP') resColor = 'text-green-400 font-bold';
-            if (f.result === 'DOWN') resColor = 'text-red-400 font-bold';
-            if (f.result === 'CANCELLED') resColor = 'text-red-600 font-bold';
-            if (f.result === 'PAUSED') resColor = 'text-yellow-500 font-bold';
-
-            const solscanLink = `https://solscan.io/account/${HOUSE_PUBKEY}`;
-
-            return `
-                <tr class="hover:bg-white/5 transition-colors">
-                    <td class="py-3 pl-2">${time}</td>
-                    <td class="py-3 ${resColor}">${f.result}</td>
-                    <td class="py-3 text-right font-bold">${(f.totalSol || 0).toFixed(3)}</td>
-                    <td class="py-3 text-right">${f.winners || 0}</td>
-                    <td class="py-3 text-right text-green-400">${(f.payout || 0).toFixed(3)}</td>
-                    <td class="py-3 text-center">
-                        <a href="${solscanLink}" target="_blank" class="text-[10px] bg-orange-900/30 text-orange-400 px-2 py-1 rounded hover:bg-orange-500 hover:text-black transition-colors">
-                            View Ledger ↗
-                        </a>
-                    </td>
-                </tr>
-            `;
-        }).join('');
-
-        if (fullHistory.length > 3) {
-            ui.btnExpand.classList.remove('hidden');
-        }
+    function getPassword() {
+        if (cachedAdminPassword) return cachedAdminPassword;
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
+        if (pwd) cachedAdminPassword = pwd;
+        return pwd;
     }
 
     // --- ADMIN ACTIONS ---
     async function togglePause() {
-        // Prompt user for password; Backend checks this against ADMIN_ACTION_PASSWORD env var
-        const pwd = prompt("ENTER ADMIN ACTION PASSWORD TO PAUSE/RESUME:");
+        const pwd = getPassword();
         if (!pwd) return;
-
         try {
             const res = await fetch(`${API_URL}/admin/toggle-pause`, {
                 method: 'POST',
@@ -236,7 +295,7 @@
             });
             const data = await res.json();
             if (data.success) alert(`SUCCESS: Market is now ${data.isPaused ? "PAUSED" : "ACTIVE"}`);
-            else alert("Error: " + data.error);
+            else { alert("Error: " + data.error); cachedAdminPassword = null; }
         } catch (e) { alert("Network Error"); }
     }
 
@@ -245,7 +304,6 @@
 
         const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
         if (!pwd) return;
-
         try {
             const res = await fetch(`${API_URL}/admin/cancel-frame`, {
                 method: 'POST',
@@ -253,7 +311,7 @@
             });
             const data = await res.json();
             if (data.success) alert("Frame Cancelled. Market Paused.");
-            else alert("Error: " + data.error);
+            else { alert("Error: " + data.error); cachedAdminPassword = null; }
         } catch (e) { alert("Network Error"); }
     }
 
@@ -302,7 +360,7 @@
             ui.statusText.classList.remove('text-red-500');
             ui.statusText.classList.add('text-green-500');
 
-            // Game State Indicator (New)
+            // Game State Indicator
             if(data.isPaused) {
                  ui.gameStateIndicator.innerText = "PAUSED ⏸";
                  ui.gameStateIndicator.className = "text-base font-bold text-yellow-500 animate-pulse";
@@ -325,18 +383,23 @@
             }
 
             if (data.market) {
-                ui.upPrice.innerText = data.market.priceUp.toFixed(4) + " SOL";
-                ui.downPrice.innerText = data.market.priceDown.toFixed(4) + " SOL";
-                
+                // FIXED: Append units to Market Depth
+                ui.upPrice.innerText = `${data.market.priceUp.toFixed(4)} SOL`;
+                ui.downPrice.innerText = `${data.market.priceDown.toFixed(4)} SOL`;
                 const netUp = Math.max(0, data.market.sharesUp - 50);
                 const netDown = Math.max(0, data.market.sharesDown - 50);
-                
                 ui.upShares.innerText = Math.round(netUp).toLocaleString();
                 ui.downShares.innerText = Math.round(netDown).toLocaleString();
             }
-
-            fullHistory = data.history || [];
-            renderHistory();
+            
+            // Render Small History in Panel
+            if (data.history) {
+                ui.historyRows.innerHTML = data.history.slice(0, 3).map(f => {
+                     const time = new Date(f.endTime || f.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                     let resColor = f.result==='UP'?'text-green-400':(f.result==='DOWN'?'text-red-400':(f.result==='CANCELLED'?'text-red-600 font-bold':(f.result==='PAUSED'?'text-yellow-500 font-bold':'text-gray-400')));
+                     return `<tr class="hover:bg-white/5"><td class="py-3 pl-2">${time}</td><td class="py-3 ${resColor}">${f.result}</td><td class="py-3 text-right">${(f.totalSol||0).toFixed(2)}</td><td class="py-3 text-right">${f.winners||0}</td><td class="py-3 text-right">${(f.payout||0).toFixed(2)}</td></tr>`;
+                }).join('');
+            }
 
             // Update lottery UI
             if (data.lottery) {
@@ -363,6 +426,19 @@
         }
     }
 
-    setInterval(poll, 2000);
-    poll();
+    ui.logsContainer.addEventListener('scroll', () => {
+        if (ui.logsContainer.scrollTop + ui.logsContainer.clientHeight < ui.logsContainer.scrollHeight - 10) {
+            isLogAutoScroll = false;
+        } else {
+            isLogAutoScroll = true;
+        }
+    });
+
+    window.onload = () => {
+        fetchLogs();
+        fetchPayouts();
+        setInterval(poll, 2000);
+        setInterval(fetchLogs, 2000); 
+        setInterval(fetchPayouts, 3000); 
+    };
 </script>

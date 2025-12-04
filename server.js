@@ -14,25 +14,20 @@ const stateMutex = new Mutex();
 const payoutMutex = new Mutex();
 const lotteryMutex = new Mutex();
 
-// Enable trust proxy if behind a load balancer (like Render) to get real IPs for rate limiting
 app.set('trust proxy', 1);
-
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// --- MAINNET CONFIGURATION ---
+// --- CONFIGURATION ---
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
 const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-
-// --- ORACLE CONFIG ---
 const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
 const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
 
-// --- CONFIG ---
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
@@ -54,33 +49,32 @@ const LOTTERY_CONFIG = {
 
 const PRIORITY_FEE_UNITS = 50000; 
 
-// --- SECURITY & VALIDATION ---
+// --- LOGGING ---
+const serverLogs = [];
+const MAX_LOGS = 100;
+function log(message, type = "INFO") {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] [${type}] ${message}`;
+    console.log(logEntry);
+    serverLogs.push(logEntry);
+    if (serverLogs.length > MAX_LOGS) serverLogs.shift();
+}
+
+// --- VALIDATION ---
 const SOLANA_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SIGNATURE_REGEX = /^[1-9A-HJ-NP-Za-km-z]{80,100}$/;
+function isValidSolanaAddress(address) { return typeof address === 'string' && SOLANA_ADDRESS_REGEX.test(address); }
+function isValidSignature(signature) { return typeof signature === 'string' && SIGNATURE_REGEX.test(signature); }
 
-function isValidSolanaAddress(address) {
-    return typeof address === 'string' && SOLANA_ADDRESS_REGEX.test(address);
-}
-
-function isValidSignature(signature) {
-    return typeof signature === 'string' && SIGNATURE_REGEX.test(signature);
-}
-
-// --- RATE LIMITING ---
-const betLimiter = rateLimit({
-	windowMs: 1 * 60 * 1000, 
-	max: 10, 
-    message: { error: "RATE_LIMIT_EXCEEDED" },
-	standardHeaders: true,
-	legacyHeaders: false,
-});
-
-const stateLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, 
-    max: 120, 
-    message: { error: "POLLING_LIMIT_EXCEEDED" },
-    standardHeaders: true,
-    legacyHeaders: false,
+// --- RATE LIMIT ---
+const betLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 10, message: { error: "RATE_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
+const stateLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 120, message: { error: "POLLING_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
+const voteLimiter = rateLimit({ 
+    windowMs: 3600 * 1000, // 1 hour per IP limit (Backup/Safety)
+    max: 1, 
+    message: { error: "IP_COOLDOWN_ACTIVE" }, 
+    standardHeaders: true, 
+    legacyHeaders: false 
 });
 
 // --- PERSISTENCE ---
@@ -101,59 +95,56 @@ const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json');
 const LOTTERY_STATE_FILE = path.join(DATA_DIR, 'lottery_state.json');
 const LOTTERY_HISTORY_FILE = path.join(DATA_DIR, 'lottery_history.json'); 
 
-console.log(`> [SYS] Persistence Root: ${DATA_DIR}`);
-if (!process.env.HELIUS_API_KEY) console.warn("⚠️ [WARN] HELIUS_API_KEY is missing! RPC calls may fail.");
+log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 
 async function atomicWrite(filePath, data) {
     const tempPath = `${filePath}.tmp`;
-    try {
-        await fs.writeFile(tempPath, JSON.stringify(data));
-        await fs.rename(tempPath, filePath); 
-    } catch (e) {
-        console.error(`> [IO] Write Error on ${filePath}:`, e.message);
-    }
+    try { await fs.writeFile(tempPath, JSON.stringify(data)); await fs.rename(tempPath, filePath); } 
+    catch (e) { log(`> [IO] Write Error on ${filePath}: ${e.message}`, "ERR"); }
 }
 
-// --- IMAGE CACHING ---
-let cachedShareImage = null;
-async function initShareImage() {
-    const src = process.env.BASE_IMAGE_SRC;
-    if (!src) return;
-    if (src.startsWith('http')) {
+// --- IMAGES ---
+let cachedShareImage = null, cachedItsFineImage = null, cachedItsOverImage = null;
+let cachedSentUpImage = null, cachedSentDownImage = null;
+let isInitialized = false; 
+
+async function cacheImage(url) {
+    if (!url) return null;
+    if (url.startsWith('http')) {
         try {
-            const response = await axios.get(src, { responseType: 'arraybuffer' });
+            const response = await axios.get(url, { responseType: 'arraybuffer' });
             const buffer = Buffer.from(response.data, 'binary');
             const type = response.headers['content-type'];
-            cachedShareImage = `data:${type};base64,${buffer.toString('base64')}`;
-        } catch (e) { console.error("> [ERR] Failed to cache share image:", e.message); }
-    } else {
-        cachedShareImage = src;
+            return `data:${type};base64,${buffer.toString('base64')}`;
+        } catch (e) { 
+            log(`> [ERR] Failed to cache image: ${url} - ${e.message}`, "ERR");
+            return null;
+        }
     }
+    return url;
 }
-initShareImage();
+
+async function initImages() {
+    log("> [SYS] Caching Images...");
+    cachedShareImage = await cacheImage(process.env.BASE_IMAGE_SRC);
+    cachedItsFineImage = await cacheImage(process.env.ITSFINE_IMG_SRC);
+    cachedItsOverImage = await cacheImage(process.env.ITSOVER_IMG_SRC);
+    cachedSentUpImage = await cacheImage(process.env.SENTIMENT_UP_IMG_SRC); 
+    cachedSentDownImage = await cacheImage(process.env.SENTIMENT_DOWN_IMG_SRC); 
+    log("> [SYS] Images Cached.");
+}
 
 let houseKeypair;
 try {
-    if (process.env.SOLANA_WALLET_JSON) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON)));
-    } else if (fsSync.existsSync('house-wallet.json')) {
-        houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json'))));
-    }
-} catch (e) { console.error("> [ERR] Wallet Load Failed:", e.message); }
+    if (process.env.SOLANA_WALLET_JSON) { houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.SOLANA_WALLET_JSON))); } 
+    else if (fsSync.existsSync('house-wallet.json')) { houseKeypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fsSync.readFileSync('house-wallet.json')))); }
+} catch (e) { log(`> [ERR] Wallet Load Failed: ${e.message}`, "ERR"); }
 
 // --- STATE ---
 let gameState = {
-    price: 0,
-    lastPriceTimestamp: 0, 
-    candleOpen: 0,
-    candleStartTime: 0,
-    poolShares: { up: 50, down: 50 },
-    bets: [],
-    recentTrades: [],
-    sharePriceHistory: [],
-    isPaused: false,
-    isResetting: false,
-    isCancelled: false
+    price: 0, lastPriceTimestamp: 0, candleOpen: 0, candleStartTime: 0, poolShares: { up: 50, down: 50 }, bets: [],
+    recentTrades: [], sharePriceHistory: [], isPaused: false, isResetting: false, isCancelled: false,
+    broadcast: { message: "", isActive: false }, vaultStartBalance: 0, hourlySentiment: { up: 0, down: 0, nextReset: 0 } 
 };
 let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, totalWinnings: 0, totalLifetimeUsers: 0, lastASDFSignature: null };
@@ -174,6 +165,35 @@ let cachedCirculatingSupply = { value: 0, timestamp: 0 };
 
 // --- STATE CACHING (NEW) ---
 let cachedPublicState = null;
+let sentimentVotes = new Map(); 
+let isProcessingQueue = false; 
+
+function getNextDayTimestamp() { // MODIFIED: Next Day Reset
+    const now = new Date();
+    now.setDate(now.getDate() + 1);
+    now.setHours(0, 0, 0, 0); // Reset at midnight EST
+    return now.getTime();
+}
+
+function getCurrentWindowStart() {
+    const now = new Date();
+    const minutes = Math.floor(now.getMinutes() / 15) * 15;
+    const start = new Date(now);
+    start.setMinutes(minutes, 0, 0, 0);
+    return start.getTime();
+}
+
+
+async function loadAndInit() {
+    await initImages(); 
+    await loadGlobalState(); 
+    await updatePrice(); 
+    
+    isInitialized = true; 
+    updatePublicStateCache(); 
+
+    log(`> [SYS] Backend Initialization Complete.`, "SYS");
+}
 
 function loadGlobalState() {
     try {
@@ -189,10 +209,25 @@ function loadGlobalState() {
             const lines = fileContent.split('\n');
             lines.slice(-5000).forEach(line => { if(line.trim()) processedSignatures.add(line.trim()); });
         }
+        if (fsSync.existsSync(PAYOUT_HISTORY_FILE)) payoutHistory = JSON.parse(fsSync.readFileSync(PAYOUT_HISTORY_FILE));
+        
+        // NEW: Load Sentiment Votes Map
+        if (fsSync.existsSync(SENTIMENT_VOTES_FILE)) {
+            const voteArray = JSON.parse(fsSync.readFileSync(SENTIMENT_VOTES_FILE));
+            sentimentVotes = new Map(voteArray);
+        }
+
         if (fsSync.existsSync(STATE_FILE)) {
             const savedState = JSON.parse(fsSync.readFileSync(STATE_FILE));
             gameState = { ...gameState, ...savedState };
             gameState.isResetting = false; 
+            if (!gameState.broadcast) gameState.broadcast = { message: "", isActive: false };
+            if (!gameState.vaultStartBalance) gameState.vaultStartBalance = 0; 
+            
+            // Re-init sentiment if missing or incorrectly hourly (now daily)
+            if (!gameState.hourlySentiment || !gameState.hourlySentiment.nextReset) {
+                gameState.hourlySentiment = { up: 0, down: 0, nextReset: getNextDayTimestamp() };
+            }
             
             if (gameState.candleStartTime > 0) {
                 const currentFrameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
@@ -201,9 +236,10 @@ function loadGlobalState() {
                     gameState.bets = frameData.bets || [];
                 }
             }
+        } else {
+            gameState.hourlySentiment = { up: 0, down: 0, nextReset: getNextDayTimestamp() };
         }
         
-        console.log("> [SYS] Loading user registry...");
         const userFiles = fsSync.readdirSync(USERS_DIR);
         userFiles.forEach(f => {
             if(f.startsWith('user_') && f.endsWith('.json')) {
@@ -213,64 +249,37 @@ function loadGlobalState() {
         globalStats.totalLifetimeUsers = knownUsers.size; 
         
         let recalculatedWinnings = 0;
-        if (historySummary.length > 0) {
-            recalculatedWinnings = historySummary.reduce((sum, frame) => sum + (frame.payout || 0), 0);
-        }
+        if (historySummary.length > 0) recalculatedWinnings = historySummary.reduce((sum, frame) => sum + (frame.payout || 0), 0);
         globalStats.totalWinnings = recalculatedWinnings;
         
-        console.log(`> [SYS] Registry loaded. ${knownUsers.size} lifetime users. Total Winnings Recalculated: ${recalculatedWinnings.toFixed(2)} SOL`);
+        log(`> [SYS] State Loaded.`);
 
-    } catch (e) { console.error("> [ERR] Load Error:", e); }
+    } catch (e) { log(`> [ERR] Load Error: ${e}`, "ERR"); }
 }
 
 async function saveSystemState() {
     await atomicWrite(STATE_FILE, {
-        candleOpen: gameState.candleOpen,
-        candleStartTime: gameState.candleStartTime,
-        poolShares: gameState.poolShares,
-        recentTrades: gameState.recentTrades,
-        sharePriceHistory: gameState.sharePriceHistory,
-        isPaused: gameState.isPaused,
-        isResetting: gameState.isResetting,
-        isCancelled: gameState.isCancelled,
-        lastPriceTimestamp: gameState.lastPriceTimestamp
+        candleOpen: gameState.candleOpen, candleStartTime: gameState.candleStartTime, poolShares: gameState.poolShares, recentTrades: gameState.recentTrades,
+        sharePriceHistory: gameState.sharePriceHistory, isPaused: gameState.isPaused, isResetting: gameState.isResetting, isCancelled: gameState.isCancelled,
+        lastPriceTimestamp: gameState.lastPriceTimestamp, broadcast: gameState.broadcast, vaultStartBalance: gameState.vaultStartBalance, hourlySentiment: gameState.hourlySentiment
     });
     await atomicWrite(STATS_FILE, globalStats);
-
-    if (gameState.candleStartTime > 0) {
-        const frameFile = path.join(FRAMES_DIR, `frame_${gameState.candleStartTime}.json`);
-        const status = gameState.isCancelled ? 'CANCELLED' : (gameState.isPaused ? 'PAUSED' : (gameState.isResetting ? 'RESETTING' : 'ACTIVE'));
-        await atomicWrite(frameFile, {
-            id: gameState.candleStartTime,
-            startTime: gameState.candleStartTime,
-            endTime: gameState.candleStartTime + FRAME_DURATION,
-            open: gameState.candleOpen,
-            poolShares: gameState.poolShares,
-            bets: [...gameState.bets],
-            status: status
-        });
-    }
+    
+    // NEW: Save Sentiment Votes Map
+    await atomicWrite(SENTIMENT_VOTES_FILE, Array.from(sentimentVotes.entries()));
 }
 
 async function getUser(pubKey) {
-    // SANITIZATION: Strict check before file system access
-    if (!isValidSolanaAddress(pubKey)) {
-        return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
-    }
-
+    if (!isValidSolanaAddress(pubKey)) { return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} }; }
     const file = path.join(USERS_DIR, `user_${pubKey}.json`);
     try {
         const data = await fs.readFile(file, 'utf8');
         return JSON.parse(data);
-    } catch (e) {
-        return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} };
-    }
+    } catch (e) { return { wins: 0, losses: 0, totalSol: 0, framesPlayed: 0, frameLog: {} }; }
 }
 
 async function saveUser(pubKey, data) {
-    // SANITIZATION: Strict check
     if (!isValidSolanaAddress(pubKey)) return;
-
     try {
         const file = path.join(USERS_DIR, `user_${pubKey}.json`);
         await atomicWrite(file, data);
@@ -744,8 +753,10 @@ async function updateASDFPurchases() {
             const postAmount = postBal?.uiTokenAmount.uiAmount || 0;
             if (postAmount > preAmount) newPurchasedAmount += (postAmount - preAmount);
         }
-        if (newPurchasedAmount > 0) globalStats.totalASDF += newPurchasedAmount;
-    } catch (e) { console.error("> [ASDF] History Check Failed:", e.message); }
+        if (newPurchasedAmount > 0) {
+             globalStats.totalASDF += newPurchasedAmount;
+        }
+    } catch (e) { log(`> [ASDF] History Check Failed: ${e.message}`, "ERR"); }
 }
 
 async function updateLeaderboard() {
@@ -758,49 +769,36 @@ async function updateLeaderboard() {
                 const raw = await fs.readFile(path.join(USERS_DIR, file), 'utf8');
                 const data = JSON.parse(raw);
                 let totalWon = 0;
-                if (data.frameLog) {
-                    Object.values(data.frameLog).forEach(log => { if (log.payoutAmount) totalWon += log.payoutAmount; });
-                }
+                if (data.frameLog) Object.values(data.frameLog).forEach(log => { if (log.payoutAmount) totalWon += log.payoutAmount; });
                 const totalGames = data.wins + data.losses;
-                if (totalGames > 0) {
-                     leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
-                }
+                if (totalGames > 0) leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
             } catch(e) {}
         }
         leaders.sort((a, b) => b.totalWon - a.totalWon);
         globalLeaderboard = leaders.slice(0, 5); 
-    } catch (e) { console.error("Leaderboard Error:", e.message); }
+    } catch (e) {}
 }
 setInterval(updateLeaderboard, 60000); 
 updateLeaderboard(); 
 
-function getCurrentWindowStart() {
-    const now = new Date();
-    const minutes = Math.floor(now.getMinutes() / 15) * 15;
-    const start = new Date(now);
-    start.setMinutes(minutes, 0, 0, 0);
-    return start.getTime();
-}
-
-// ... (queue logic unchanged) ...
 async function processPayoutQueue() {
+    if (isProcessingQueue) return;
+    isProcessingQueue = true;
+
     const release = await payoutMutex.acquire();
     try {
-        if (!houseKeypair || !fsSync.existsSync(QUEUE_FILE)) {
-            currentQueueLength = 0;
-            return;
-        }
+        if (!houseKeypair || !fsSync.existsSync(QUEUE_FILE)) { currentQueueLength = 0; return; }
         let queueData = [];
         try { queueData = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) { queueData = []; }
-        
         currentQueueLength = queueData.length;
         if (!queueData || queueData.length === 0) return;
 
-        console.log(`> [QUEUE] Processing ${queueData.length} batches...`);
+        log(`> [QUEUE] Processing ${queueData.length} batches...`, "QUEUE");
         const connection = new Connection(SOLANA_NETWORK, 'confirmed');
         
         while (queueData.length > 0) {
             const batch = queueData[0];
+            if (typeof batch.retries === 'undefined') batch.retries = 0;
             const { type, recipients, frameId } = batch;
             try {
                 const tx = new Transaction();
@@ -808,43 +806,28 @@ async function processPayoutQueue() {
                 tx.add(priorityFeeIx);
                 let hasInstructions = false;
                 const validRecipients = [];
-                
+                let totalBatchAmount = 0;
                 if (type === 'USER_PAYOUT' || type === 'USER_REFUND') {
                     for (const item of recipients) {
                         const uData = await getUser(item.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId]) {
-                            const entry = uData.frameLog[frameId];
-                            if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
-                            if (type === 'USER_REFUND' && entry.refundTx) continue;
-                        }
-                        validRecipients.push(item);
+                        if (type === 'USER_PAYOUT' && uData.frameLog && uData.frameLog[frameId] && uData.frameLog[frameId].payoutTx) continue; 
+                        validRecipients.push(item); totalBatchAmount += (item.amount || 0);
                     }
-                } else {
-                     recipients.forEach(r => validRecipients.push(r));
-                }
-
+                } else { recipients.forEach(r => { validRecipients.push(r); totalBatchAmount += (r.amount || 0); }); }
                 if (validRecipients.length > 0) {
-                    for (const item of validRecipients) {
-                        tx.add(SystemProgram.transfer({
-                            fromPubkey: houseKeypair.publicKey,
-                            toPubkey: new PublicKey(item.pubKey),
-                            lamports: item.amount
-                        }));
-                        hasInstructions = true;
-                    }
-
+                    for (const item of validRecipients) { tx.add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(item.pubKey), lamports: item.amount })); hasInstructions = true; }
                     if (hasInstructions) {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed', maxRetries: 5 });
-                        console.log(`> [QUEUE] Batch Sent: ${sig}`);
-
+                        log(`> [TX] Batch Sent (${type}): ${sig}`, "TX");
+                        const historyRecord = { timestamp: Date.now(), frameId: frameId || 'N/A', type: type, signature: sig, recipientCount: validRecipients.length, totalAmount: (totalBatchAmount / 1e9).toFixed(4) };
+                        payoutHistory.unshift(historyRecord);
+                        if (payoutHistory.length > 100) payoutHistory.pop();
+                        await atomicWrite(PAYOUT_HISTORY_FILE, payoutHistory);
+                        await fs.appendFile(PAYOUT_MASTER_LOG, JSON.stringify(historyRecord) + '\n');
                         if (type === 'USER_PAYOUT') {
                             for (const item of validRecipients) {
                                 const uData = await getUser(item.pubKey);
-                                if (uData.frameLog && uData.frameLog[frameId]) {
-                                    uData.frameLog[frameId].payoutTx = sig;
-                                    uData.frameLog[frameId].payoutAmount = item.amount / 1e9;
-                                    await saveUser(item.pubKey, uData);
-                                }
+                                if (uData.frameLog && uData.frameLog[frameId]) { uData.frameLog[frameId].payoutTx = sig; uData.frameLog[frameId].payoutAmount = item.amount / 1e9; await saveUser(item.pubKey, uData); }
                             }
                         } else if (type === 'USER_REFUND') {
                             for (const item of validRecipients) {
@@ -856,29 +839,47 @@ async function processPayoutQueue() {
                         }
                     }
                 }
-            } catch (e) { console.error(`> [QUEUE] Batch Failed: ${e.message}`); }
-            queueData.shift();
-            await atomicWrite(QUEUE_FILE, queueData);
-            currentQueueLength = queueData.length;
+                queueData.shift(); await atomicWrite(QUEUE_FILE, queueData); currentQueueLength = queueData.length;
+            } catch (e) { 
+                log(`> [TX] Batch Failed: ${e.message}`, "ERR");
+                batch.retries = (batch.retries || 0) + 1;
+                if (batch.retries >= 5) {
+                     log(`> [QUEUE] Batch failed 5 times. Decomposing or Logging Failure.`, "ERR");
+                     queueData.shift(); 
+                     if (batch.recipients.length > 1) {
+                         for (const item of batch.recipients) { queueData.push({ type: 'USER_REFUND', frameId: batch.frameId, recipients: [item], retries: 0 }); }
+                     } else {
+                         const failedRecord = { timestamp: Date.now(), batch: batch, error: e.message };
+                         await fs.appendFile(FAILED_REFUNDS_FILE, JSON.stringify(failedRecord) + '\n');
+                     }
+                     await atomicWrite(QUEUE_FILE, queueData);
+                } else {
+                     await atomicWrite(QUEUE_FILE, queueData);
+                     break; 
+                }
+                currentQueueLength = queueData.length;
+            }
         }
-    } catch (e) { console.error("> [QUEUE] Error:", e); }
-    finally { release(); }
+    } catch (e) { log(`> [QUEUE] Error: ${e}`, "ERR"); }
+    finally { release(); isProcessingQueue = false; }
 }
 
-// ... (queuePayouts, processRefunds unchanged) ...
+setInterval(processPayoutQueue, 20000);
+
 async function queuePayouts(frameId, result, bets, totalVolume) {
+    log(`> [PAYOUT] Queuing payouts for Frame ${frameId}. Result: ${result}, Vol: ${totalVolume}`, "PAYOUT");
     if (totalVolume === 0) return;
     const queue = []; 
 
     if (result === "FLAT") {
         const burnLamports = Math.floor((totalVolume * 0.99) * 1e9);
-        if (burnLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: burnLamports }] });
+        if (burnLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: burnLamports }], retries: 0 });
     } else {
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9); 
         const upkeepLamports = Math.floor((totalVolume * UPKEEP_PERCENT) * 1e9); 
         
-        if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }] });
-        if (upkeepLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: UPKEEP_WALLET.toString(), amount: upkeepLamports }] });
+        if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }], retries: 0 });
+        if (upkeepLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: UPKEEP_WALLET.toString(), amount: upkeepLamports }], retries: 0 });
     }
 
     if (result !== "FLAT") {
@@ -918,20 +919,25 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
                     const payoutLamports = Math.floor(potLamports * shareRatio);
                     if (payoutLamports > 5000) batchRecipients.push({ pubKey: winner.pubKey, amount: payoutLamports });
                 }
-                if (batchRecipients.length > 0) queue.push({ type: 'USER_PAYOUT', frameId: frameId, recipients: batchRecipients });
+                if (batchRecipients.length > 0) queue.push({ type: 'USER_PAYOUT', frameId: frameId, recipients: batchRecipients, retries: 0 });
             }
         }
     }
 
-    let existingQueue = [];
-    try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
-    const newQueue = existingQueue.concat(queue);
-    await atomicWrite(QUEUE_FILE, newQueue);
-    currentQueueLength = newQueue.length;
+    const release = await payoutMutex.acquire();
+    try {
+        let existingQueue = [];
+        if (fsSync.existsSync(QUEUE_FILE)) { try { existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {} }
+        const newQueue = existingQueue.concat(queue);
+        await atomicWrite(QUEUE_FILE, newQueue);
+        currentQueueLength = newQueue.length;
+    } finally { release(); }
+    
     processPayoutQueue();
 }
 
 async function processRefunds(frameId, bets) {
+    log(`> [REFUND] Processing refunds for Frame ${frameId}. Count: ${bets.length}`, "REFUND");
     if (!houseKeypair || bets.length === 0) return;
     const refunds = {};
     let totalFee = 0;
@@ -942,47 +948,55 @@ async function processRefunds(frameId, bets) {
         totalFee += (bet.costSol * 0.01 * 1e9);
     });
     const queue = [];
-    if (totalFee > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: Math.floor(totalFee) }] });
+    if (totalFee > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: Math.floor(totalFee) }], retries: 0 });
     const recipients = Object.entries(refunds).map(([pub, amt]) => ({ pubKey: pub, amount: amt }));
     const BATCH_SIZE = 12;
     for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
-        queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch }); 
+        queue.push({ type: 'USER_REFUND', frameId: frameId, recipients: batch, retries: 0 }); 
     }
-    let existingQueue = [];
-    try { if (fsSync.existsSync(QUEUE_FILE)) existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {}
-    const newQueue = existingQueue.concat(queue);
-    await atomicWrite(QUEUE_FILE, newQueue);
-    currentQueueLength = newQueue.length;
+    const release = await payoutMutex.acquire();
+    try {
+        let existingQueue = [];
+        if (fsSync.existsSync(QUEUE_FILE)) { try { existingQueue = JSON.parse(await fs.readFile(QUEUE_FILE, 'utf8')); } catch(e) {} }
+        const newQueue = existingQueue.concat(queue);
+        await atomicWrite(QUEUE_FILE, newQueue);
+        currentQueueLength = newQueue.length;
+    } finally { release(); }
+    
     processPayoutQueue();
 }
 
 async function cancelCurrentFrameAndRefund() {
     gameState.isPaused = true;
     gameState.isCancelled = true;
-    
     if (gameState.bets.length > 0) {
-        console.log(`> [CANCEL] Performing Cancellation & Refund for frame ${gameState.candleStartTime}...`);
+        log(`> [CANCEL] Performing Cancellation & Refund for frame ${gameState.candleStartTime}...`, "CANCEL");
         const betsToRefund = [...gameState.bets];
         const frameRecord = { id: gameState.candleStartTime, time: new Date(gameState.candleStartTime).toISOString(), result: "CANCELLED", totalSol: 0, winners: 0, payout: 0 };
-        
         historySummary.unshift(frameRecord);
         if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
-
         gameState.bets = [];
         gameState.poolShares = { up: 50, down: 50 };
-        
         processRefunds(gameState.candleStartTime, betsToRefund);
     }
     await saveSystemState();
 }
 
 async function closeFrame(closePrice, closeTime) {
-    const release = await stateMutex.acquire(); 
     try {
         const frameId = gameState.candleStartTime; 
-        console.log(`> [SYS] Closing Frame: ${frameId}`);
+        log(`> [SYS] Closing Frame: ${frameId}`);
+
+        // 1. GET VAULT CLOSING BALANCE
+        let vaultEndBalance = 0;
+        if (houseKeypair) {
+             try {
+                const connection = new Connection(SOLANA_NETWORK);
+                vaultEndBalance = (await connection.getBalance(houseKeypair.publicKey)) / 1e9;
+             } catch(e) { log(`> [ERR] Failed to fetch vault close balance: ${e.message}`, "WARN"); }
+        }
 
         await updateASDFPurchases();
 
@@ -995,14 +1009,25 @@ async function closeFrame(closePrice, closeTime) {
         const realSharesDown = Math.max(0, gameState.poolShares.down - 50);
         const frameSol = gameState.bets.reduce((acc, bet) => acc + bet.costSol, 0);
 
-        let frameFees = (result === "FLAT") ? frameSol * 0.99 : frameSol * FEE_PERCENT;
-        globalStats.totalFees += frameFees;
+        let feeAmt = 0;
+        let upkeepAmt = 0;
+
+        if (result === "FLAT") {
+             feeAmt = frameSol * 0.99;
+        } else {
+             feeAmt = frameSol * FEE_PERCENT;
+             upkeepAmt = frameSol * UPKEEP_PERCENT;
+        }
+
+        globalStats.totalFees += feeAmt;
 
         let winnerCount = 0;
         let payoutTotal = 0;
+        // FIX: userPositions hoisted to avoid ReferenceError below
+        const userPositions = {}; 
+        
         if (result !== "FLAT") {
             const potSol = frameSol * 0.94;
-            const userPositions = {};
             gameState.bets.forEach(bet => {
                 if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
                 if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
@@ -1023,11 +1048,14 @@ async function closeFrame(closePrice, closeTime) {
             }
         }
 
+        const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
+        
         const frameRecord = {
             id: frameId, startTime: frameId, endTime: frameId + FRAME_DURATION,
             time: new Date(frameId).toISOString(), open: openPrice, close: closePrice,
             result: result, sharesUp: realSharesUp, sharesDown: realSharesDown,
-            totalSol: frameSol, winners: winnerCount, payout: payoutTotal
+            totalSol: frameSol, winners: winnerCount, payout: payoutTotal,
+            fee: feeAmt, upkeep: upkeepAmt, users: uniqueUsers, vStart: gameState.vaultStartBalance, vEnd: vaultEndBalance
         };
         
         historySummary.unshift(frameRecord);
@@ -1035,14 +1063,6 @@ async function closeFrame(closePrice, closeTime) {
         await atomicWrite(HISTORY_FILE, historySummary);
 
         const betsSnapshot = [...gameState.bets];
-        const userPositions = {};
-        betsSnapshot.forEach(bet => {
-            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
-            if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-            else userPositions[bet.user].down += bet.shares;
-            userPositions[bet.user].sol += bet.costSol;
-        });
-
         const usersToUpdate = Object.entries(userPositions);
         const USER_IO_BATCH_SIZE = 20; 
         for (let i = 0; i < usersToUpdate.length; i += USER_IO_BATCH_SIZE) {
@@ -1050,15 +1070,12 @@ async function closeFrame(closePrice, closeTime) {
             await Promise.all(batch.map(async ([pubKey, pos]) => {
                 const userData = await getUser(pubKey);
                 userData.framesPlayed += 1;
-                
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
-
                 let userDir = "FLAT";
                 if (rUp > rDown) userDir = "UP";
                 else if (rDown > rUp) userDir = "DOWN";
                 if (rUp === rDown) userDir = "FLAT";
-
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
@@ -1073,17 +1090,22 @@ async function closeFrame(closePrice, closeTime) {
         processedSignatures.clear();
         await fs.writeFile(SIGS_FILE, '');
 
-        await queuePayouts(frameId, result, betsSnapshot, frameSol);
-
+        updatePublicStateCache();
+        
         gameState.candleStartTime = closeTime;
         gameState.candleOpen = closePrice;
         gameState.poolShares = { up: 50, down: 50 }; 
         gameState.bets = []; 
         gameState.sharePriceHistory = [];
         gameState.isResetting = false; 
+        gameState.vaultStartBalance = vaultEndBalance; 
+
         await saveSystemState();
-        
-    } finally { release(); }
+        await queuePayouts(frameId, result, betsSnapshot, frameSol); 
+    } catch(e) {
+        log(`> [ERR] CloseFrame Failed: ${e.message}`, "ERR");
+        gameState.isResetting = false; 
+    }
 }
 
 async function updatePrice() {
@@ -1097,7 +1119,7 @@ async function updatePrice() {
             fetchedPrice = Number(p.price) * Math.pow(10, p.expo);
             priceFound = true;
         }
-    } catch (e) { console.log(`Pyth Failed: ${e.message}`); }
+    } catch (e) { console.log(`[ORACLE] Pyth Failed: ${e.message}`); }
 
     if (!priceFound && COINGECKO_API_KEY) {
         try {
@@ -1109,7 +1131,7 @@ async function updatePrice() {
                 fetchedPrice = response.data.solana.usd;
                 priceFound = true;
             }
-        } catch (e) { console.log(`CoinGecko Failed: ${e.message}`); }
+        } catch (e) { console.log(`[ORACLE] CoinGecko Failed: ${e.message}`); }
     }
 
     if (priceFound) {
@@ -1118,17 +1140,41 @@ async function updatePrice() {
             gameState.lastPriceTimestamp = Date.now();
             const currentWindowStart = getCurrentWindowStart();
 
+            if (Date.now() >= gameState.hourlySentiment.nextReset) {
+                log("> [SENTIMENT] Daily reset triggered. Clearing votes.", "SENTIMENT");
+                gameState.hourlySentiment.up = 0;
+                gameState.hourlySentiment.down = 0;
+                gameState.hourlySentiment.nextReset = getNextDayTimestamp();
+                sentimentVotes.clear(); 
+                await saveSystemState();
+            }
+
+            const frameEndTime = gameState.candleStartTime + FRAME_DURATION;
+            if (gameState.isResetting && Date.now() > (frameEndTime + 60000)) {
+                 log("⚠️ [FAILSAFE] RESETTING stuck > 1m. Refunds issued. Starting new frame.", "FAILSAFE");
+                 await cancelCurrentFrameAndRefund();
+                 gameState.isResetting = false; 
+                 gameState.isPaused = false; 
+                 gameState.isCancelled = false; 
+                 gameState.candleStartTime = currentWindowStart;
+                 gameState.candleOpen = fetchedPrice;
+                 gameState.poolShares = { up: 50, down: 50 }; 
+                 gameState.bets = []; 
+                 gameState.sharePriceHistory = [];
+                 await saveSystemState();
+                 updatePublicStateCache();
+                 return;
+            }
             if (gameState.isResetting) return;
-            
             if (gameState.isPaused) {
                 const timeRemaining = (gameState.candleStartTime + FRAME_DURATION) - Date.now();
                 if (!gameState.isCancelled && timeRemaining < 300000 && timeRemaining > 0) {
-                    console.log("⚠️ Auto-cancelling due to prolonged pause...");
+                    log("⚠️ [AUTO] Auto-cancelling due to prolonged pause...", "AUTO");
                     await cancelCurrentFrameAndRefund(); 
                     return;
                 }
                 if (currentWindowStart > gameState.candleStartTime) {
-                    console.log("> [SYS] Unpausing for new Frame.");
+                    log("> [SYS] Unpausing for new Frame.");
                     if (!gameState.isCancelled) {
                          const skippedFrameRecord = {
                             id: gameState.candleStartTime,
@@ -1154,19 +1200,18 @@ async function updatePrice() {
                 }
                 return;
             }
-
             if (currentWindowStart > gameState.candleStartTime) {
                 if (gameState.candleStartTime === 0) {
                     gameState.candleStartTime = currentWindowStart;
                     gameState.candleOpen = fetchedPrice;
                     await saveSystemState();
                 } else {
+                    log(`> [SYS] Closing Frame: ${gameState.candleStartTime} @ $${fetchedPrice}`);
                     gameState.isResetting = true; 
                     await saveSystemState();
-                    closeFrame(fetchedPrice, currentWindowStart);
+                    await closeFrame(fetchedPrice, currentWindowStart);
                 }
             }
-
             const totalS = gameState.poolShares.up + gameState.poolShares.down;
             const pUp = (gameState.poolShares.up / totalS) * PRICE_SCALE;
             const pDown = (gameState.poolShares.down / totalS) * PRICE_SCALE;
@@ -1179,41 +1224,33 @@ async function updatePrice() {
     }
 }
 
-
 setInterval(updatePrice, 10000); 
 updatePrice(); 
-processPayoutQueue();
 
-// --- CACHE GENERATION (NEW) ---
-// Updates the public state cache every 500ms
+// --- CACHE GENERATION ---
 function updatePublicStateCache() {
+    if (!isInitialized) return; 
     const now = Date.now();
     const priceChange = gameState.price - gameState.candleOpen;
     const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
     const currentVolume = gameState.bets.reduce((acc, b) => acc + b.costSol, 0);
-
     const totalShares = gameState.poolShares.up + gameState.poolShares.down;
     const priceUp = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
     const priceDown = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-
     const history = gameState.sharePriceHistory || [];
     const baseline = { up: 0.05, down: 0.05 };
     const oneMinAgo = history.find(x => x.t >= now - 60000) || baseline;
     const fiveMinAgo = history.find(x => x.t >= now - 300000) || baseline;
-
     function getPercentChange(current, old) { if (!old || old === 0) return 0; return ((current - old) / old) * 100; }
-
     const changes = {
         up1m: getPercentChange(priceUp, oneMinAgo.up),
         up5m: getPercentChange(priceUp, fiveMinAgo.up),
         down1m: getPercentChange(priceDown, oneMinAgo.down),
         down5m: getPercentChange(priceDown, fiveMinAgo.down),
     };
-    
     const uniqueUsers = new Set(gameState.bets.map(b => b.user)).size;
     const lastFramePot = historySummary.length > 0 ? historySummary[0].totalSol : 0;
 
-    // The Cache Object
     cachedPublicState = {
         price: gameState.price,
         openPrice: gameState.candleOpen,
@@ -1252,28 +1289,19 @@ function updatePublicStateCache() {
     };
 }
 
-// Start the cache update loop
 setInterval(updatePublicStateCache, 500);
 
 // --- ENDPOINTS ---
 app.get('/api/state', stateLimiter, async (req, res) => {
-    // Fallback if cache is not yet built (e.g. immediately after restart)
-    if (!cachedPublicState) updatePublicStateCache();
-
-    // Start with cached data
+    if (!isInitialized || !cachedPublicState) return res.status(503).json({ error: "SERVICE_UNAVAILABLE", reason: "Backend cache initializing." });
     const response = { ...cachedPublicState };
-
-    // Re-calculate precise time remaining to ensure countdown is smooth
     const now = new Date();
     const nextWindowStart = getCurrentWindowStart() + FRAME_DURATION;
     response.msUntilClose = nextWindowStart - now.getTime();
-
-    // Handle personalized data ONLY if a valid user key is provided
     const userKey = req.query.user;
     if (userKey && isValidSolanaAddress(userKey)) {
         const myStats = await getUser(userKey);
         response.userStats = myStats;
-
         const userBets = gameState.bets.filter(b => b.user === userKey);
         response.activePosition = {
             upShares: userBets.filter(b => b.direction === 'UP').reduce((a, b) => a + b.shares, 0),
@@ -1283,26 +1311,70 @@ app.get('/api/state', stateLimiter, async (req, res) => {
             wageredSol: userBets.reduce((a, b) => a + b.costSol, 0)
         };
     }
-
     res.json(response);
 });
 
-app.get('/api/share-image', (req, res) => {
-    res.json({ image: cachedShareImage });
+app.get('/api/image/fine', (req, res) => { res.json({ image: cachedItsFineImage }); });
+app.get('/api/image/over', (req, res) => { res.json({ image: cachedItsOverImage }); });
+app.get('/api/share-image', (req, res) => { res.json({ image: cachedShareImage }); });
+app.get('/api/image/sentiment-up', (req, res) => { res.json({ image: cachedSentUpImage }); });
+app.get('/api/image/sentiment-down', (req, res) => { res.json({ image: cachedSentDownImage }); });
+
+app.post('/api/sentiment/vote', voteLimiter, async (req, res) => {
+    const { direction, userPubKey } = req.body; 
+    if (!['UP', 'DOWN'].includes(direction)) return res.status(400).json({ error: "Invalid Direction" });
+    if (!userPubKey || !isValidSolanaAddress(userPubKey)) return res.status(400).json({ error: "Invalid Wallet" });
+
+    const release = await stateMutex.acquire();
+    try {
+        const now = Date.now();
+        const lastVoteTime = sentimentVotes.get(userPubKey) || 0;
+        const COOLDOWN_MS = 60 * 60 * 1000; // 1 Hour
+
+        if (now - lastVoteTime < COOLDOWN_MS) {
+            return res.status(429).json({ error: "VOTE_COOLDOWN", nextVote: lastVoteTime + COOLDOWN_MS });
+        }
+
+        if (direction === 'UP') gameState.hourlySentiment.up++;
+        else gameState.hourlySentiment.down++;
+        
+        sentimentVotes.set(userPubKey, now);
+        
+        await saveSystemState();
+        updatePublicStateCache(); 
+        log(`> [SENTIMENT] Vote: ${direction} from ${userPubKey.slice(0,6)}`, "SENT");
+        res.json({ success: true, sentiment: gameState.hourlySentiment });
+    } finally { release(); }
+});
+
+app.get('/api/admin/logs', (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
+    res.json({ logs: serverLogs });
+});
+
+app.get('/api/admin/payouts', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
+    let currentQueue = [];
+    if (fsSync.existsSync(QUEUE_FILE)) { try { currentQueue = JSON.parse(fsSync.readFileSync(QUEUE_FILE, 'utf8')); } catch(e) {} }
+    res.json({ queue: currentQueue, history: payoutHistory });
+});
+
+app.get('/api/admin/full-history', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
+    res.json({ history: historySummary });
 });
 
 app.post('/api/verify-bet', betLimiter, async (req, res) => {
+    if (!isInitialized) return res.status(503).json({ error: "SERVICE_UNAVAILABLE" });
     if (gameState.isPaused) return res.status(400).json({ error: "MARKET_PAUSED" });
     if (gameState.isResetting) return res.status(503).json({ error: "CALCULATING_RESULTS" });
     if (gameState.isCancelled) return res.status(400).json({ error: "MARKET_CANCELLED" });
 
     const { signature, direction, userPubKey } = req.body;
-    
-    // SANITIZATION
-    if (!signature || !userPubKey || !isValidSolanaAddress(userPubKey) || !isValidSignature(signature)) {
-        return res.status(400).json({ error: "INVALID_DATA_FORMAT" });
-    }
-    
+    if (!signature || !userPubKey || !isValidSolanaAddress(userPubKey) || !isValidSignature(signature)) return res.status(400).json({ error: "INVALID_DATA_FORMAT" });
     if (processedSignatures.has(signature)) return res.status(400).json({ error: "DUPLICATE_TX_DETECTED" });
 
     let solAmount = 0;
@@ -1336,28 +1408,17 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
         let price = 0.05; 
         if (direction === 'UP') price = (gameState.poolShares.up / totalShares) * PRICE_SCALE;
         else price = (gameState.poolShares.down / totalShares) * PRICE_SCALE;
-        
         if(price < 0.001) price = 0.001;
 
         const sharesReceived = solAmount / price;
-        
-        if (!Number.isFinite(sharesReceived) || sharesReceived <= 0) {
-             return res.status(500).json({ error: "CALCULATION_ERROR" });
-        }
+        if (!Number.isFinite(sharesReceived) || sharesReceived <= 0) return res.status(500).json({ error: "CALCULATION_ERROR" });
 
         if (direction === 'UP') gameState.poolShares.up += sharesReceived;
         else gameState.poolShares.down += sharesReceived;
 
-        // UPDATE: Check and update knownUsers for lifetime stats
-        if (!knownUsers.has(userPubKey)) {
-            knownUsers.add(userPubKey);
-            globalStats.totalLifetimeUsers++;
-        }
+        if (!knownUsers.has(userPubKey)) { knownUsers.add(userPubKey); globalStats.totalLifetimeUsers++; }
 
-        getUser(userPubKey).then(userData => {
-            userData.totalSol += solAmount;
-            saveUser(userPubKey, userData);
-        });
+        getUser(userPubKey).then(userData => { userData.totalSol += solAmount; saveUser(userPubKey, userData); });
 
         // Record daily activity for lottery eligibility
         recordUserActivity(userPubKey);
@@ -1369,28 +1430,27 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
         globalStats.totalVolume += solAmount;
         processedSignatures.add(signature);
         await fs.appendFile(path.join(DATA_DIR, 'signatures.log'), signature + '\n');
-
-        // Trigger immediate cache refresh to reflect volume/shares changes
         updatePublicStateCache();
-
         await saveSystemState();
+        log(`> [TRADE] ${userPubKey.slice(0,6)} bought ${sharesReceived.toFixed(2)} ${direction} for ${solAmount} SOL`, "TRADE");
         res.json({ success: true, shares: sharesReceived, price: price });
-
-    } catch (e) { console.error(e); res.status(500).json({ error: "STATE_ERROR" }); } finally { release(); }
+    } catch (e) { 
+        log(`> [ERR] Trade Error: ${e}`, "ERR");
+        res.status(500).json({ error: "STATE_ERROR" }); 
+    } finally { release(); }
 });
 
 app.post('/api/admin/toggle-pause', async (req, res) => {
     const auth = req.headers['x-admin-secret'];
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
-
     const release = await stateMutex.acquire();
     try {
         gameState.isPaused = !gameState.isPaused;
         if (!gameState.isPaused) gameState.isCancelled = false; 
         await saveSystemState();
-        console.log(`> [ADMIN] Market Paused State toggled to: ${gameState.isPaused}`);
+        log(`> [ADMIN] Market Paused State toggled to: ${gameState.isPaused}`, "ADMIN");
         res.json({ success: true, isPaused: gameState.isPaused });
-    } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); } 
+    } catch (e) { log(`> [ERR] Admin Pause Error: ${e}`, "ERR"); res.status(500).json({ error: "ADMIN_ERROR" }); } 
     finally { release(); }
 });
 
@@ -1400,6 +1460,7 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
     const release = await stateMutex.acquire();
     try {
         await cancelCurrentFrameAndRefund();
+        log(`> [ADMIN] Frame Cancelled by Admin`, "ADMIN");
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
     } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); }
     finally { release(); }
