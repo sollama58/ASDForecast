@@ -32,7 +32,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; 
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "142.1"; // UPDATE: Robust ASDF Tracking
+const BACKEND_VERSION = "145.0"; // UPDATE: Full Logic Restoration
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- LOGGING ---
@@ -152,7 +152,6 @@ function getNextDayTimestamp() {
     return now.getTime();
 }
 
-// --- UTILITY FUNCTION ---
 function getCurrentWindowStart() {
     const now = new Date();
     const minutes = Math.floor(now.getMinutes() / 15) * 15;
@@ -161,10 +160,34 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
+// --- RECALCULATION LOGIC (NEW) ---
+function recalculateStatsFromHistory() {
+    log("> [STATS] Recalculating Global Stats from History...", "SYS");
+    let vol = 0;
+    let fees = 0;
+    
+    if (historySummary && historySummary.length > 0) {
+        historySummary.forEach(frame => {
+            vol += (frame.totalSol || 0);
+            const frameFee = (frame.fee || 0);
+            const frameUpkeep = (frame.upkeep || 0);
+            fees += (frameFee + frameUpkeep); 
+        });
+    }
+    
+    globalStats.totalVolume = vol;
+    globalStats.totalFees = fees; 
+    
+    log(`> [STATS] Verified: Volume=${vol.toFixed(2)}, Fees=${fees.toFixed(2)}`, "SYS");
+}
 
 async function loadAndInit() {
     await initImages(); 
     await loadGlobalState(); 
+    
+    recalculateStatsFromHistory();
+    await updateLeaderboard(); 
+    
     await updatePrice(); 
     
     isInitialized = true; 
@@ -181,8 +204,6 @@ function loadGlobalState() {
             globalStats = { ...globalStats, ...loaded };
             if(!globalStats.totalWinnings) globalStats.totalWinnings = 0;
             if(!globalStats.totalLifetimeUsers) globalStats.totalLifetimeUsers = 0;
-            if(!globalStats.totalFees) globalStats.totalFees = 0;
-            if(!globalStats.totalVolume) globalStats.totalVolume = 0;
         }
         if (fsSync.existsSync(SIGS_FILE)) {
             const fileContent = fsSync.readFileSync(SIGS_FILE, 'utf-8');
@@ -229,8 +250,6 @@ function loadGlobalState() {
         if (historySummary.length > 0) recalculatedWinnings = historySummary.reduce((sum, frame) => sum + (frame.payout || 0), 0);
         globalStats.totalWinnings = recalculatedWinnings;
         
-        log(`> [SYS] State Loaded.`);
-
     } catch (e) { log(`> [ERR] Load Error: ${e}`, "ERR"); }
 }
 
@@ -261,20 +280,20 @@ async function saveUser(pubKey, data) {
     } catch (e) {}
 }
 
-// UPDATED: Robust ASDF History Fetcher
+// ROBUST ASDF SCANNER
 async function updateASDFPurchases() {
     const connection = new Connection(SOLANA_NETWORK); 
     try {
         let currentSignature = null;
         let allNewSignatures = [];
-        const options = { limit: 100 }; // Fetch up to 100 at a time
+        const options = { limit: 100 }; 
         
         if (globalStats.lastASDFSignature) {
             options.until = globalStats.lastASDFSignature;
         }
 
-        // Fetch signatures until we hit the last known one or run out (max 5 pages safety)
-        for (let i = 0; i < 5; i++) {
+        // Recursive scan (up to 10 pages) to ensure nothing is missed
+        for (let i = 0; i < 10; i++) {
              if (currentSignature) options.before = currentSignature;
              
              const signaturesDetails = await connection.getSignaturesForAddress(FEE_WALLET, options);
@@ -283,18 +302,16 @@ async function updateASDFPurchases() {
              allNewSignatures.push(...signaturesDetails);
              currentSignature = signaturesDetails[signaturesDetails.length - 1].signature;
              
-             // If we hit the 'until' target (implied by library, but explicit check safe)
              if (globalStats.lastASDFSignature && signaturesDetails.some(s => s.signature === globalStats.lastASDFSignature)) break;
         }
 
         if (allNewSignatures.length === 0) return;
 
-        // Update last known to the most recent one found
-        globalStats.lastASDFSignature = allNewSignatures[0].signature;
+        allNewSignatures.reverse();
+        globalStats.lastASDFSignature = allNewSignatures[allNewSignatures.length - 1].signature;
 
-        // Process transactions in chunks of 50
-        const BATCH_SIZE = 50;
         let newPurchasedAmount = 0;
+        const BATCH_SIZE = 25; 
 
         for (let i = 0; i < allNewSignatures.length; i += BATCH_SIZE) {
             const batchSigs = allNewSignatures.slice(i, i + BATCH_SIZE).map(s => s.signature);
@@ -302,7 +319,6 @@ async function updateASDFPurchases() {
             
             for (const tx of txs) {
                 if (!tx || !tx.meta) continue;
-                // Calculate token balance change for ASDF
                 const preBal = tx.meta.preTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
                 const postBal = tx.meta.postTokenBalances.find(b => b.mint === ASDF_MINT && b.owner === FEE_WALLET.toString());
                 
@@ -317,7 +333,7 @@ async function updateASDFPurchases() {
 
         if (newPurchasedAmount > 0) {
              globalStats.totalASDF += newPurchasedAmount;
-             log(`> [ASDF] Added +${newPurchasedAmount.toFixed(2)} ASDF from ${allNewSignatures.length} txs`, "ASDF");
+             log(`> [ASDF] +${newPurchasedAmount.toFixed(2)} ASDF from ${allNewSignatures.length} txs`, "ASDF");
              await atomicWrite(STATS_FILE, globalStats);
         }
 
@@ -335,17 +351,18 @@ async function updateLeaderboard() {
                 const data = JSON.parse(raw);
                 let totalWon = 0;
                 if (data.frameLog) Object.values(data.frameLog).forEach(log => { if (log.payoutAmount) totalWon += log.payoutAmount; });
-                const totalGames = data.wins + data.losses;
-                if (totalGames > 0) leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
-            } catch(e) {}
+                const totalGames = (data.wins || 0) + (data.losses || 0);
+                if (totalGames > 0) leaders.push({ pubKey: file.replace('user_', '').replace('.json', ''), wins: data.wins || 0, bets: totalGames, winRate: (data.wins / totalGames) * 100, totalWon: totalWon });
+            } catch(e) { }
         }
         leaders.sort((a, b) => b.totalWon - a.totalWon);
         globalLeaderboard = leaders.slice(0, 5); 
-    } catch (e) {}
+        if (isInitialized) updatePublicStateCache();
+    } catch (e) { console.error("Leaderboard Error:", e.message); }
 }
 setInterval(updateLeaderboard, 60000); 
-updateLeaderboard(); 
 
+// --- PAYOUT PROCESSOR (FULL LOGIC RESTORED) ---
 async function processPayoutQueue() {
     if (isProcessingQueue) return;
     isProcessingQueue = true;
@@ -364,7 +381,9 @@ async function processPayoutQueue() {
         while (queueData.length > 0) {
             const batch = queueData[0];
             if (typeof batch.retries === 'undefined') batch.retries = 0;
+
             const { type, recipients, frameId } = batch;
+            
             try {
                 const tx = new Transaction();
                 const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_UNITS });
@@ -372,27 +391,47 @@ async function processPayoutQueue() {
                 let hasInstructions = false;
                 const validRecipients = [];
                 let totalBatchAmount = 0;
+                
                 if (type === 'USER_PAYOUT' || type === 'USER_REFUND') {
                     for (const item of recipients) {
                         const uData = await getUser(item.pubKey);
+                        // Double payout check
                         if (type === 'USER_PAYOUT' && uData.frameLog && uData.frameLog[frameId] && uData.frameLog[frameId].payoutTx) continue; 
-                        validRecipients.push(item); totalBatchAmount += (item.amount || 0);
+                        validRecipients.push(item);
+                        totalBatchAmount += (item.amount || 0);
                     }
-                } else { recipients.forEach(r => { validRecipients.push(r); totalBatchAmount += (r.amount || 0); }); }
+                } else {
+                     recipients.forEach(r => { validRecipients.push(r); totalBatchAmount += (r.amount || 0); });
+                }
+
                 if (validRecipients.length > 0) {
-                    for (const item of validRecipients) { tx.add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(item.pubKey), lamports: item.amount })); hasInstructions = true; }
+                    for (const item of validRecipients) {
+                        tx.add(SystemProgram.transfer({
+                            fromPubkey: houseKeypair.publicKey,
+                            toPubkey: new PublicKey(item.pubKey),
+                            lamports: item.amount
+                        }));
+                        hasInstructions = true;
+                    }
+
                     if (hasInstructions) {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed', maxRetries: 5 });
                         log(`> [TX] Batch Sent (${type}): ${sig}`, "TX");
+                        
                         const historyRecord = { timestamp: Date.now(), frameId: frameId || 'N/A', type: type, signature: sig, recipientCount: validRecipients.length, totalAmount: (totalBatchAmount / 1e9).toFixed(4) };
                         payoutHistory.unshift(historyRecord);
                         if (payoutHistory.length > 100) payoutHistory.pop();
                         await atomicWrite(PAYOUT_HISTORY_FILE, payoutHistory);
                         await fs.appendFile(PAYOUT_MASTER_LOG, JSON.stringify(historyRecord) + '\n');
+
                         if (type === 'USER_PAYOUT') {
                             for (const item of validRecipients) {
                                 const uData = await getUser(item.pubKey);
-                                if (uData.frameLog && uData.frameLog[frameId]) { uData.frameLog[frameId].payoutTx = sig; uData.frameLog[frameId].payoutAmount = item.amount / 1e9; await saveUser(item.pubKey, uData); }
+                                if (uData.frameLog && uData.frameLog[frameId]) {
+                                    uData.frameLog[frameId].payoutTx = sig;
+                                    uData.frameLog[frameId].payoutAmount = item.amount / 1e9;
+                                    await saveUser(item.pubKey, uData);
+                                }
                             }
                         } else if (type === 'USER_REFUND') {
                             for (const item of validRecipients) {
@@ -404,16 +443,25 @@ async function processPayoutQueue() {
                         }
                     }
                 }
-                queueData.shift(); await atomicWrite(QUEUE_FILE, queueData); currentQueueLength = queueData.length;
+                queueData.shift(); 
+                await atomicWrite(QUEUE_FILE, queueData);
+                currentQueueLength = queueData.length;
+
             } catch (e) { 
                 log(`> [TX] Batch Failed: ${e.message}`, "ERR");
                 batch.retries = (batch.retries || 0) + 1;
+                
                 if (batch.retries >= 5) {
                      log(`> [QUEUE] Batch failed 5 times. Decomposing or Logging Failure.`, "ERR");
                      queueData.shift(); 
+                     
                      if (batch.recipients.length > 1) {
-                         for (const item of batch.recipients) { queueData.push({ type: 'USER_REFUND', frameId: batch.frameId, recipients: [item], retries: 0 }); }
+                         // DECOMPOSE BULK
+                         for (const item of batch.recipients) {
+                             queueData.push({ type: 'USER_REFUND', frameId: batch.frameId, recipients: [item], retries: 0 });
+                         }
                      } else {
+                         // DEAD LETTER LOGGING
                          const failedRecord = { timestamp: Date.now(), batch: batch, error: e.message };
                          await fs.appendFile(FAILED_REFUNDS_FILE, JSON.stringify(failedRecord) + '\n');
                      }
@@ -442,7 +490,6 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
     } else {
         const feeLamports = Math.floor((totalVolume * FEE_PERCENT) * 1e9); 
         const upkeepLamports = Math.floor((totalVolume * UPKEEP_PERCENT) * 1e9); 
-        
         if (feeLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: FEE_WALLET.toString(), amount: feeLamports }], retries: 0 });
         if (upkeepLamports > 0) queue.push({ type: 'FEE', recipients: [{ pubKey: UPKEEP_WALLET.toString(), amount: upkeepLamports }], retries: 0 });
     }
@@ -585,6 +632,7 @@ async function closeFrame(closePrice, closeTime) {
              upkeepAmt = frameSol * UPKEEP_PERCENT;
         }
 
+        // Update Running Total (also updated via Recalculation)
         globalStats.totalFees += feeAmt;
 
         let winnerCount = 0;
@@ -626,6 +674,9 @@ async function closeFrame(closePrice, closeTime) {
         historySummary.unshift(frameRecord);
         if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
+
+        // RECALCULATE TOTALS FROM HISTORY TO ENSURE SYNC
+        recalculateStatsFromHistory();
 
         const betsSnapshot = [...gameState.bets];
         const usersToUpdate = Object.entries(userPositions);
