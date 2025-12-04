@@ -37,7 +37,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; // 0.48%
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "126.0"; // UPDATE: Payout Queue Monitor & Logging
+const BACKEND_VERSION = "128.0"; // UPDATE: Overlap Protection & Full History
 
 const PRIORITY_FEE_UNITS = 50000; 
 
@@ -99,6 +99,7 @@ const SIGS_FILE = path.join(DATA_DIR, 'signatures.log');
 const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json'); 
 const PAYOUT_HISTORY_FILE = path.join(DATA_DIR, 'payout_history.json');
 const PAYOUT_MASTER_LOG = path.join(DATA_DIR, 'payout_master.log');
+const FAILED_REFUNDS_FILE = path.join(DATA_DIR, 'failed_refunds.json');
 
 log(`> [SYS] Persistence Root: ${DATA_DIR}`);
 if (!process.env.HELIUS_API_KEY) log("⚠️ [WARN] HELIUS_API_KEY is missing! RPC calls may fail.", "WARN");
@@ -173,7 +174,6 @@ let processedSignatures = new Set();
 let globalLeaderboard = [];
 let knownUsers = new Set(); 
 let currentQueueLength = 0; 
-// NEW: Payout History Array (for UI)
 let payoutHistory = [];
 
 // --- STATE CACHING ---
@@ -347,8 +347,16 @@ function getCurrentWindowStart() {
     return start.getTime();
 }
 
-// --- PAYOUT PROCESSOR (UPDATED WITH HISTORY LOGGING) ---
+// --- PAYOUT PROCESSOR ---
+let isProcessingQueue = false; // OVERLAP PREVENTION FLAG
+
 async function processPayoutQueue() {
+    if (isProcessingQueue) {
+        console.log("Skipping queue processing - already active.");
+        return;
+    }
+    isProcessingQueue = true;
+
     const release = await payoutMutex.acquire();
     try {
         if (!houseKeypair || !fsSync.existsSync(QUEUE_FILE)) {
@@ -381,10 +389,8 @@ async function processPayoutQueue() {
                 if (type === 'USER_PAYOUT' || type === 'USER_REFUND') {
                     for (const item of recipients) {
                         const uData = await getUser(item.pubKey);
-                        if (uData.frameLog && uData.frameLog[frameId]) {
-                            const entry = uData.frameLog[frameId];
-                            if (type === 'USER_PAYOUT' && entry.payoutTx) continue;
-                            if (type === 'USER_REFUND' && entry.refundTx) continue;
+                        if (type === 'USER_PAYOUT' && uData.frameLog && uData.frameLog[frameId] && uData.frameLog[frameId].payoutTx) {
+                            continue; 
                         }
                         validRecipients.push(item);
                         totalBatchAmount += (item.amount || 0);
@@ -410,7 +416,6 @@ async function processPayoutQueue() {
                         const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: 'confirmed', maxRetries: 5 });
                         log(`> [TX] Batch Sent (${type}): ${sig}`, "TX");
                         
-                        // LOG PAYOUT TO HISTORY
                         const historyRecord = {
                             timestamp: Date.now(),
                             frameId: frameId || 'N/A',
@@ -420,14 +425,9 @@ async function processPayoutQueue() {
                             totalAmount: (totalBatchAmount / 1e9).toFixed(4)
                         };
                         
-                        // Update In-Memory
                         payoutHistory.unshift(historyRecord);
                         if (payoutHistory.length > 100) payoutHistory.pop();
-                        
-                        // Update Disk JSON
                         await atomicWrite(PAYOUT_HISTORY_FILE, payoutHistory);
-                        
-                        // Append to Master Log
                         await fs.appendFile(PAYOUT_MASTER_LOG, JSON.stringify(historyRecord) + '\n');
 
                         if (type === 'USER_PAYOUT') {
@@ -457,24 +457,51 @@ async function processPayoutQueue() {
             } catch (e) { 
                 log(`> [TX] Batch Failed: ${e.message}`, "ERR");
                 batch.retries = (batch.retries || 0) + 1;
+                
                 if (batch.retries >= 5) {
-                     log(`> [QUEUE] Batch dropped after 5 retries.`, "ERR");
-                     queueData.shift(); 
+                     log(`> [QUEUE] Batch failed 5 times. Decomposing or Logging Failure.`, "ERR");
+                     
+                     queueData.shift(); // Remove blocked batch
+                     
+                     // DECOMPOSE OR LOG LOGIC
+                     if (batch.recipients.length > 1) {
+                         // If bulk batch, decompose into single refunds
+                         for (const item of batch.recipients) {
+                             queueData.push({
+                                 type: 'USER_REFUND',
+                                 frameId: batch.frameId,
+                                 recipients: [item],
+                                 retries: 0
+                             });
+                         }
+                     } else {
+                         // If it was ALREADY a single item (e.g. single refund) and failed 5 times
+                         // Log to Dead Letter File
+                         const failedRecord = { timestamp: Date.now(), batch: batch, error: e.message };
+                         await fs.appendFile(FAILED_REFUNDS_FILE, JSON.stringify(failedRecord) + '\n');
+                         log(`> [CRITICAL] Refund permanently failed for ${batch.recipients[0]?.pubKey}. Logged to failed_refunds.json`, "ERR");
+                     }
+                     
+                     await atomicWrite(QUEUE_FILE, queueData);
                 } else {
                      await atomicWrite(QUEUE_FILE, queueData);
                      break; 
                 }
-                await atomicWrite(QUEUE_FILE, queueData);
+                
                 currentQueueLength = queueData.length;
             }
         }
     } catch (e) { log(`> [QUEUE] Error: ${e}`, "ERR"); }
-    finally { release(); }
+    finally { 
+        release(); 
+        isProcessingQueue = false; // Release overlap lock
+    }
 }
 
 // WATCHDOG: Ensure queue processes even if triggers fail
 setInterval(processPayoutQueue, 20000);
 
+// ... (queuePayouts, processRefunds unchanged) ...
 async function queuePayouts(frameId, result, bets, totalVolume) {
     log(`> [PAYOUT] Queuing payouts for Frame ${frameId}. Result: ${result}, Vol: ${totalVolume}`, "PAYOUT");
     if (totalVolume === 0) return;
@@ -585,7 +612,6 @@ async function processRefunds(frameId, bets) {
     processPayoutQueue();
 }
 
-// ... (cancelCurrentFrameAndRefund, closeFrame, updatePrice UNCHANGED) ...
 async function cancelCurrentFrameAndRefund() {
     gameState.isPaused = true;
     gameState.isCancelled = true;
@@ -696,7 +722,7 @@ async function closeFrame(closePrice, closeTime) {
         gameState.sharePriceHistory = [];
         gameState.isResetting = false; 
         await saveSystemState();
-        await queuePayouts(frameId, result, betsSnapshot, frameSol); // Use 'await' but it's fire-and-forget internally for mutex safety
+        await queuePayouts(frameId, result, betsSnapshot, frameSol); 
     } catch(e) {
         log(`> [ERR] CloseFrame Failed: ${e.message}`, "ERR");
         gameState.isResetting = false; 
@@ -889,7 +915,6 @@ app.get('/api/image/fine', (req, res) => { res.json({ image: cachedItsFineImage 
 app.get('/api/image/over', (req, res) => { res.json({ image: cachedItsOverImage }); });
 app.get('/api/share-image', (req, res) => { res.json({ image: cachedShareImage }); });
 
-// NEW: ADMIN LOGS & PAYOUT MONITOR
 app.get('/api/admin/logs', (req, res) => {
     const auth = req.headers['x-admin-secret'];
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
@@ -899,13 +924,18 @@ app.get('/api/admin/logs', (req, res) => {
 app.get('/api/admin/payouts', async (req, res) => {
     const auth = req.headers['x-admin-secret'];
     if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
-    
     let currentQueue = [];
     if (fsSync.existsSync(QUEUE_FILE)) {
         try { currentQueue = JSON.parse(fsSync.readFileSync(QUEUE_FILE, 'utf8')); } catch(e) {}
     }
-    
     res.json({ queue: currentQueue, history: payoutHistory });
+});
+
+// NEW: Full History Endpoint
+app.get('/api/admin/full-history', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) return res.status(403).json({ error: "UNAUTHORIZED" });
+    res.json({ history: historySummary });
 });
 
 app.post('/api/verify-bet', betLimiter, async (req, res) => {

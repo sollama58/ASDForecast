@@ -1,4 +1,4 @@
-<!-- ASDForecast v113.0 // UI: IMAGE DISPLAY LOGIC & DEFAULT -->
+<!-- ASDForecast v113.0 // UI: IMAGE DISPLAY LOGIC & REFUND STATUS -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -591,6 +591,8 @@
             } else if (state.userLog && state.userLog[f.id]) {
                 const log = state.userLog[f.id];
                 if (log.result === 'LOSS') userStatus = `<span class="text-red-500 font-bold">LOSS (${(log.wagered||0).toFixed(3)})</span>`;
+                // UPDATE: Handle REFUNDED_ERROR status from backend
+                else if (log.result === 'REFUNDED_ERROR') userStatus = `<span class="text-yellow-500 font-bold">⚠️ ERR: REFUNDED</span>`;
                 else if (log.payoutTx) userStatus = `<a href="https://solscan.io/tx/${log.payoutTx}" target="_blank" class="text-green-400 underline">WIN (+${log.payoutAmount?.toFixed(3)})</a>`;
                 else if (log.result === 'WIN') userStatus = `<span class="text-green-600">WIN (Processing)</span>`;
             }
@@ -748,6 +750,8 @@
                              const log = state.userLog[last.id];
                              let res = log.result === 'WIN' ? `<span class="text-green-400">WIN</span>` : `<span class="text-red-400">LOSS</span>`;
                              if (log.result === 'CANCELLED') res = `<span class="text-yellow-500">REFUNDED</span>`;
+                             // UPDATE: Check for Refunded Error
+                             if (log.result === 'REFUNDED_ERROR') res = `<span class="text-yellow-500 font-bold">⚠️ REFUNDED</span>`;
                              
                              // TEXT UPDATE
                              ui.lastFrameStats.innerHTML = `
@@ -868,9 +872,17 @@
 
             const d = await res.json();
 
-            if(d.success) { alert(`Bought ${Math.round(d.shares)} shares!`); refreshBalance(); } else alert(d.error);
+            if(d.success) { 
+                alert(`Bought ${Math.round(d.shares)} shares!`);
+                refreshBalance(); 
+            } else { 
+                alert(d.error);
+            }
 
-        } catch(e) { console.error(e); alert("Tx Failed"); } finally { btn.innerHTML = old; btn.disabled = false; }
+        } catch(e) { 
+            console.error(e); 
+            alert("Tx Failed");
+        } finally { btn.innerHTML = old; btn.disabled = false; }
 
     }
 </script>
