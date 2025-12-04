@@ -1,4 +1,4 @@
-<!-- ASDForecast v118.0 // UI: REMOVED STATUS IMAGE -->
+<!-- ASDForecast v120.0 // FEATURE: HOURLY SENTIMENT METER -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -73,6 +73,22 @@
         animation: pulse-border 2s infinite;
     }
     @keyframes pulse-border { 0% { border-color: #ea580c; } 50% { border-color: #fff7ed; } 100% { border-color: #ea580c; } }
+    
+    /* SENTIMENT METER STYLES */
+    .sent-btn {
+        width: 60px; height: 60px;
+        border-radius: 50%;
+        border: 2px solid #444;
+        transition: transform 0.1s, border-color 0.2s;
+        overflow: hidden;
+        background: #000;
+        cursor: pointer;
+    }
+    .sent-btn:active:not(:disabled) { transform: scale(0.95); }
+    .sent-btn:disabled { opacity: 0.5; filter: grayscale(100%); cursor: not-allowed; }
+    .sent-btn-up:hover:not(:disabled) { border-color: #22c55e; }
+    .sent-btn-down:hover:not(:disabled) { border-color: #ef4444; }
+    .sent-img { width: 100%; height: 100%; object-fit: cover; }
 </style>
 
 <div id="asd-app">
@@ -128,7 +144,7 @@
                     </div>
                 </div>
 
-                <!-- SENTIMENT -->
+                <!-- SENTIMENT (SHARES) -->
                 <div class="panel p-6 bg-black/20 relative">
                     <h3 id="net-shares-header" class="text-lg font-bold text-white mb-4">Net Shares Bought</h3>
                     <div class="flex justify-between text-sm font-bold font-mono text-white mb-1">
@@ -167,6 +183,40 @@
                         </table>
                     </div>
                 </div>
+
+                <!-- NEW: HOURLY SENTIMENT METER -->
+                <div class="panel p-6 bg-black/40 border-orange-900/30 border-2">
+                    <div class="flex justify-between items-center mb-4">
+                         <h3 class="text-sm font-bold text-orange-400 uppercase tracking-wider">Hourly Crowd Sentiment</h3>
+                         <span class="text-[10px] font-mono text-gray-500" id="sent-timer">Reset: --:--</span>
+                    </div>
+                    
+                    <div class="flex items-center gap-4">
+                        <!-- UP BUTTON -->
+                        <button id="btn-sent-up" onclick="voteSentiment('UP')" class="sent-btn sent-btn-up" title="Vote Up">
+                            <img id="img-sent-up" src="" class="sent-img" alt="UP" onerror="this.style.display='none'">
+                        </button>
+                        
+                        <!-- PROGRESS BAR -->
+                        <div class="flex-grow h-4 bg-gray-900 rounded-full overflow-hidden border border-gray-700 relative">
+                            <div id="sent-bar-fill" class="h-full bg-green-500 transition-all duration-500" style="width: 50%"></div>
+                            <!-- Center Marker -->
+                            <div class="absolute top-0 bottom-0 left-1/2 w-0.5 bg-black/50"></div>
+                        </div>
+                        
+                        <!-- DOWN BUTTON -->
+                        <button id="btn-sent-down" onclick="voteSentiment('DOWN')" class="sent-btn sent-btn-down" title="Vote Down">
+                            <img id="img-sent-down" src="" class="sent-img" alt="DOWN" onerror="this.style.display='none'">
+                        </button>
+                    </div>
+                    
+                    <div class="flex justify-between text-[10px] font-mono text-gray-400 mt-2 px-2">
+                        <span>UP: <span id="val-sent-up" class="text-green-400 font-bold">0</span></span>
+                        <span>DOWN: <span id="val-sent-down" class="text-red-400 font-bold">0</span></span>
+                    </div>
+                    <p class="text-[9px] text-center mt-3 text-gray-600 font-mono">Vote once per 15s. Resets hourly.</p>
+                </div>
+
             </div>
 
             <!-- RIGHT: TERMINAL -->
@@ -197,6 +247,7 @@
                                 <div class="flex justify-between items-center border-t border-orange-500/20 pt-1 mt-1"><span class="text-orange-300/70">Est. Win Payout:</span><span id="stat-payout" class="text-yellow-400 font-bold">0.00 SOL</span></div>
                             </div>
                             
+                            <!-- LAST FRAME PERFORMANCE -->
                             <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono">
                                 <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
                                 <div id="last-frame-stats" class="text-orange-200 italic opacity-50">Waiting for close...</div>
@@ -228,14 +279,20 @@
         <!-- STATS -->
         <div class="panel p-4 bg-black/40 mb-8">
             <h3 class="text-xs font-bold text-orange-500 uppercase tracking-wider mb-2">Global Damage Report</h3>
+            <!-- 6-Grid Layout for Stats -->
             <div class="grid grid-cols-2 md:grid-cols-3 gap-6 text-center md:text-left">
+                <!-- ROW 1 (Original Stats) -->
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Total Volume</span><span id="global-vol" class="text-xl font-bold font-mono text-white">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Ash Pile (Fees)</span><span id="global-fees" class="text-xl font-bold font-mono text-red-400">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">ASDF Purchased</span><span id="global-asdf" class="text-xl font-bold font-mono text-yellow-400">0 ASDF</span></div>
+                
+                <!-- ROW 2 (New Stats) -->
                 <div>
                     <span class="block text-[10px] text-orange-400 font-mono uppercase">Last Payout</span>
+                    <!-- Link to Solscan -->
                     <a id="link-last-payout" href="https://solscan.io/account/BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy" target="_blank" class="text-xl font-bold font-mono text-white hover:text-orange-400 transition-colors underline decoration-dotted decoration-orange-900" title="Verify on Solscan">--</a>
                 </div>
+                <!-- MODIFIED: Header changed from Total Winnings to Lifetime Payouts -->
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Payouts</span><span id="global-winnings" class="text-xl font-bold font-mono text-green-400">0.00 SOL</span></div>
                 <div><span class="block text-[10px] text-orange-400 font-mono uppercase">Lifetime Degens</span><span id="global-lifetime-users" class="text-xl font-bold font-mono text-yellow-400">0</span></div>
             </div>
@@ -261,7 +318,7 @@
             </div>
         </div>
 
-        <!-- ABOUT SECTION -->
+        <!-- ABOUT SECTION (FULLY EXPANDED) -->
         <div class="panel p-6 bg-black/40">
             <button onclick="window.toggleAbout()" class="w-full text-left flex justify-between items-center text-orange-400 hover:text-white transition-colors"><span class="font-bold text-lg font-mono">>> METHODOLOGY & MECHANICS</span><span id="about-icon">[ + ]</span></button>
             <div id="about-content" class="hidden mt-4 text-sm text-orange-200/80 font-mono space-y-6 border-t border-orange-900/50 pt-4">
@@ -273,7 +330,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v118.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v120.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -336,7 +393,7 @@
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
     let PublicKey, SystemProgram, Transaction;
-    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null };
+    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null, images: { fine: null, over: null, sentUp: null, sentDown: null } };
     let ui = {};
     let pollTimeout = null; // Store timeout ID for cleanup
 
@@ -394,7 +451,17 @@
             
             // HISTORY MODAL
             publicHistoryRows: document.getElementById('public-history-rows'),
-            publicHistorySearch: document.getElementById('public-history-search')
+            publicHistorySearch: document.getElementById('public-history-search'),
+
+            // NEW SENTIMENT UI
+            sentBarFill: document.getElementById('sent-bar-fill'),
+            valSentUp: document.getElementById('val-sent-up'),
+            valSentDown: document.getElementById('val-sent-down'),
+            btnSentUp: document.getElementById('btn-sent-up'),
+            btnSentDown: document.getElementById('btn-sent-down'),
+            imgSentUp: document.getElementById('img-sent-up'),
+            imgSentDown: document.getElementById('img-sent-down'),
+            sentTimer: document.getElementById('sent-timer')
         };
 
         if(ui.btnInc) ui.btnInc.onclick = () => adjustQty(1);
@@ -404,7 +471,12 @@
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
 
-        // Fetch Images immediately - REMOVED STATUS IMAGE FETCHING FOR CLEANUP
+        // Fetch Images immediately
+        fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
+        fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
+        // NEW SENTIMENT IMAGES
+        fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentUp) ui.imgSentUp.src = d.image; });
+        fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentDown) ui.imgSentDown.src = d.image; });
 
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
@@ -420,6 +492,29 @@
         setInterval(updateTimer, 1000);
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
     });
+    
+    // NEW: Sentiment Vote Logic
+    window.voteSentiment = async function(dir) {
+        const btn = dir === 'UP' ? ui.btnSentUp : ui.btnSentDown;
+        btn.disabled = true; // Immediate visual feedback
+        
+        try {
+            const res = await fetch(`${API_URL}/api/sentiment/vote`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ direction: dir })
+            });
+            const data = await res.json();
+            if (data.error === "COOLDOWN_ACTIVE") {
+                alert("Cooldown active: Please wait 15 seconds.");
+            } else if (!data.success) {
+                alert("Vote failed.");
+            }
+        } catch(e) { console.error(e); }
+        
+        // Keep disabled for 15s
+        setTimeout(() => { btn.disabled = false; }, 15000);
+    };
 
     function updateTimer() {
         if (state.isResetting) { if(ui.timer) ui.timer.innerText = "Resetting..."; return; }
@@ -656,7 +751,7 @@
                 const log = state.userLog[f.id];
                 if (log.result === 'LOSS') userStatus = `<span class="text-red-500 font-bold">LOSS (${(log.wagered||0).toFixed(3)})</span>`;
                 // UPDATE: Handle REFUNDED_ERROR status from backend
-                else if (log.result === 'REFUNDED_ERROR') userStatus = `<span class="text-yellow-500 font-bold">⚠️ ERR: REFUNDED</span>`;
+                else if (log.result === 'REFUNDED_ERROR') userStatus = `<span class="text-yellow-500 font-bold">⚠️ REFUNDED</span>`;
                 else if (log.payoutTx) userStatus = `<a href="https://solscan.io/tx/${log.payoutTx}" target="_blank" class="text-green-400 underline">WIN (+${log.payoutAmount?.toFixed(3)})</a>`;
                 else if (log.result === 'WIN') userStatus = `<span class="text-green-600">WIN (Processing)</span>`;
             }
@@ -803,6 +898,24 @@
                 // RE-ADD LEADERBOARD LOGIC
                 if(data.leaderboard) renderLeaderboard(data.leaderboard);
                 if(data.recentTrades) renderTicker(data.recentTrades);
+                
+                // UPDATE: SENTIMENT UI
+                if (data.hourlySentiment) {
+                    const sUp = data.hourlySentiment.up;
+                    const sDown = data.hourlySentiment.down;
+                    const sTotal = sUp + sDown || 1;
+                    ui.valSentUp.innerText = sUp;
+                    ui.valSentDown.innerText = sDown;
+                    ui.sentBarFill.style.width = `${(sUp / sTotal) * 100}%`;
+                    
+                    const now = Date.now();
+                    if (data.hourlySentiment.nextReset > now) {
+                         const mins = Math.floor((data.hourlySentiment.nextReset - now) / 60000);
+                         ui.sentTimer.innerText = `Reset: ${mins}m`;
+                    } else {
+                         ui.sentTimer.innerText = `Resetting...`;
+                    }
+                }
 
                 if(data.userStats) {
                     state.userLog = data.userStats.frameLog || {};
@@ -832,7 +945,7 @@
                                 <div class="flex justify-between border-t border-white/10 mt-1 pt-1"><span>Result:</span> ${res}</div>
                              `;
                              
-                             // STATUS IMAGE REMOVED AS REQUESTED
+                             // IMAGE UPDATE removed by request
 
                         } else { 
                             // FIX: If user is connected but hasn't played or frame is active/pending close
@@ -898,7 +1011,10 @@
 
 
 
-        if(!state.isOnline) return alert("System Offline");
+        if(!state.isOnline) { 
+            alert("System Offline");
+            return; 
+        }
 
         const qty = parseInt(ui.qty.value);
 
@@ -946,3 +1062,300 @@
 
     }
 </script>
+
+}
+
+{
+type: uploaded file
+fileName: sollama58/asdforecast/ASDForecast-0e7c96161830427ec109745c634d39c35a93bc71/control_panel.html
+fullText:
+<!-- ASDForecast CONTROL PANEL v1.0 -->
+
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+    body { background-color: #0c0c0c; color: #ffedd5; font-family: 'JetBrains Mono', monospace; }
+    .panel { background: #1a0f0a; border: 2px solid #7c2d12; border-radius: 8px; padding: 20px; box-shadow: 4px 4px 0 #9a3412; }
+    .stat-label { color: #fb923c; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .stat-value { font-size: 1.5rem; font-weight: bold; color: #fff; }
+    .history-scroll { max-height: 500px; overflow-y: auto; }
+    .history-scroll::-webkit-scrollbar { width: 6px; }
+    .history-scroll::-webkit-scrollbar-thumb { background: #ea580c; border-radius: 3px; }
+    .blink { animation: blink 1s infinite; }
+    @keyframes blink { 50% { opacity: 0.5; } }
+</style>
+
+<div class="max-w-6xl mx-auto p-6">
+    
+    <!-- HEADER -->
+    <div class="flex flex-col md:flex-row justify-between items-center mb-8 border-b border-orange-900 pb-4 gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-orange-500">ASDForecast // CONTROL PANEL</h1>
+            <p class="text-xs text-gray-500">Admin Telemetry & Emergency Controls</p>
+        </div>
+        
+        <div class="flex items-center gap-6">
+            
+            <!-- PAUSE CONTROLS -->
+            <div class="flex items-center gap-3 bg-gray-900 p-2 rounded border border-gray-700">
+                <div class="text-right">
+                    <div class="text-[10px] text-gray-400 uppercase">Game State</div>
+                    <div id="game-state-indicator" class="text-sm font-bold text-gray-500">CONNECTING...</div>
+                </div>
+                <button onclick="togglePause()" class="bg-yellow-900 border border-yellow-500 text-yellow-200 px-4 py-2 rounded text-xs font-bold hover:bg-yellow-600 hover:text-white transition-colors uppercase">
+                    ⏸ Switch
+                </button>
+            </div>
+
+            <!-- EMERGENCY CANCEL -->
+            <button onclick="cancelFrame()" class="bg-red-900 border border-red-500 text-red-200 px-4 py-2 rounded text-xs font-bold hover:bg-red-600 hover:text-white transition-colors uppercase">
+                ⚠️ Cancel & Refund
+            </button>
+
+            <!-- CONNECTION STATUS -->
+            <div id="status-box" class="flex items-center gap-2 px-3 py-1 bg-black border border-gray-800 rounded h-10">
+                <span class="w-2 h-2 rounded-full bg-gray-500" id="status-dot"></span>
+                <span class="text-xs" id="status-text">OFFLINE</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- LIVE STATS GRID -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="panel"> <div class="stat-label">Current Frame Volume</div> <div id="val-volume" class="stat-value">0.00 SOL</div> </div>
+        <div class="panel"> <div class="stat-label">Active Wallets</div> <div id="val-users" class="stat-value">0</div> </div>
+        <div class="panel"> <div class="stat-label">Time Remaining</div> <div id="val-timer" class="stat-value text-yellow-400">--:--</div> </div>
+        <div class="panel"> <div class="stat-label">SOL Price</div> <div id="val-price" class="stat-value">$0.00</div> </div>
+    </div>
+
+    <!-- MARKET DEPTH -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+        <!-- UP SIDE -->
+        <div class="panel border-green-900/50">
+            <h3 class="text-green-500 font-bold mb-4 border-b border-green-900/30 pb-2">UP POOL 📈</h3>
+            <div class="grid grid-cols-2 gap-4">
+                <div> <div class="stat-label text-green-700">Share Price</div> <div id="val-up-price" class="text-xl font-bold text-green-400">0.000 SOL</div> </div>
+                <div> <div class="stat-label text-green-700">Net Shares</div> <div id="val-up-shares" class="text-xl font-bold text-white">0</div> </div>
+            </div>
+        </div>
+        <!-- DOWN SIDE -->
+        <div class="panel border-red-900/50">
+            <h3 class="text-red-500 font-bold mb-4 border-b border-red-900/30 pb-2">DOWN POOL 🔥</h3>
+            <div class="grid grid-cols-2 gap-4">
+                <div> <div class="stat-label text-red-700">Share Price</div> <div id="val-down-price" class="text-xl font-bold text-red-400">0.000 SOL</div> </div>
+                <div> <div class="stat-label text-red-700">Net Shares</div> <div id="val-down-shares" class="text-xl font-bold text-white">0</div> </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- HISTORY PANEL -->
+    <div class="panel bg-black/40">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-white">Frame History</h3>
+        </div>
+        <div id="history-container" class="history-scroll">
+            <table class="w-full text-xs font-mono text-left">
+                <thead class="text-orange-500 border-b border-orange-900/50 sticky top-0 bg-black">
+                    <tr>
+                        <th class="pb-2 pl-2">Time</th>
+                        <th class="pb-2">Result</th>
+                        <th class="pb-2 text-right">Vol</th>
+                        <th class="pb-2 text-right">Winners</th>
+                        <th class="pb-2 text-right">Payout</th>
+                        <th class="pb-2 text-center">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="history-rows" class="text-orange-200/80 divide-y divide-orange-900/20">
+                    <tr><td colspan="6" class="py-4 text-center italic opacity-50">Loading history...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- EXPAND BUTTON -->
+        <button id="btn-expand-history" onclick="toggleHistory()" class="w-full py-3 text-xs text-orange-500/50 hover:text-orange-500 hover:bg-orange-900/20 mt-2 font-mono border-t border-dashed border-orange-900/30 transition-colors hidden">
+            [ + ] EXPAND FULL HISTORY
+        </button>
+    </div>
+
+    <div class="mt-8 text-center text-xs text-gray-600">
+        <p>Backend Connection: <span class="font-mono text-orange-900">https://asdforecast.onrender.com</span></p>
+    </div>
+
+</div>
+
+<script>
+    const API_URL = 'https://asdforecast.onrender.com/api';
+    const HOUSE_PUBKEY = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; 
+    
+    let fullHistory = [];
+    let isHistoryExpanded = false;
+
+    const ui = {
+        statusDot: document.getElementById('status-dot'),
+        statusText: document.getElementById('status-text'),
+        gameStateIndicator: document.getElementById('game-state-indicator'),
+        vol: document.getElementById('val-volume'),
+        users: document.getElementById('val-users'),
+        timer: document.getElementById('val-timer'),
+        price: document.getElementById('val-price'),
+        upPrice: document.getElementById('val-up-price'),
+        upShares: document.getElementById('val-up-shares'),
+        downPrice: document.getElementById('val-down-price'),
+        downShares: document.getElementById('val-down-shares'),
+        historyRows: document.getElementById('history-rows'),
+        historyContainer: document.getElementById('history-container'),
+        btnExpand: document.getElementById('btn-expand-history')
+    };
+
+    function toggleHistory() {
+        isHistoryExpanded = !isHistoryExpanded;
+        if (isHistoryExpanded) {
+            ui.btnExpand.innerText = "[ - ] COLLAPSE HISTORY";
+            ui.historyContainer.classList.remove('history-collapsed');
+            ui.historyContainer.classList.add('history-scroll');
+        } else {
+            ui.btnExpand.innerText = "[ + ] EXPAND FULL HISTORY";
+            ui.historyContainer.classList.remove('history-scroll');
+        }
+        renderHistory();
+    }
+
+    function renderHistory() {
+        if (!fullHistory || fullHistory.length === 0) {
+            ui.historyRows.innerHTML = '<tr><td colspan="6" class="py-4 text-center italic opacity-50">No history available.</td></tr>';
+            return;
+        }
+
+        const dataToShow = isHistoryExpanded ? fullHistory : fullHistory.slice(0, 3);
+
+        ui.historyRows.innerHTML = dataToShow.map(f => {
+            const time = new Date(f.time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit' });
+            
+            let resColor = 'text-gray-400';
+            if (f.result === 'UP') resColor = 'text-green-400 font-bold';
+            if (f.result === 'DOWN') resColor = 'text-red-400 font-bold';
+            if (f.result === 'CANCELLED') resColor = 'text-red-600 font-bold';
+            if (f.result === 'PAUSED') resColor = 'text-yellow-500 font-bold';
+
+            const solscanLink = `https://solscan.io/account/${HOUSE_PUBKEY}`;
+
+            return `
+                <tr class="hover:bg-white/5 transition-colors">
+                    <td class="py-3 pl-2">${time}</td>
+                    <td class="py-3 ${resColor}">${f.result}</td>
+                    <td class="py-3 text-right font-bold">${(f.totalSol || 0).toFixed(3)}</td>
+                    <td class="py-3 text-right">${f.winners || 0}</td>
+                    <td class="py-3 text-right text-green-400">${(f.payout || 0).toFixed(3)}</td>
+                    <td class="py-3 text-center">
+                        <a href="${solscanLink}" target="_blank" class="text-[10px] bg-orange-900/30 text-orange-400 px-2 py-1 rounded hover:bg-orange-500 hover:text-black transition-colors">
+                            View Ledger ↗
+                        </a>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        if (fullHistory.length > 3) {
+            ui.btnExpand.classList.remove('hidden');
+        }
+    }
+
+    // --- ADMIN ACTIONS ---
+    async function togglePause() {
+        // Prompt user for password; Backend checks this against ADMIN_ACTION_PASSWORD env var
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD TO PAUSE/RESUME:");
+        if (!pwd) return;
+
+        try {
+            const res = await fetch(`${API_URL}/admin/toggle-pause`, {
+                method: 'POST',
+                headers: { 'x-admin-secret': pwd }
+            });
+            const data = await res.json();
+            if (data.success) alert(`SUCCESS: Market is now ${data.isPaused ? "PAUSED" : "ACTIVE"}`);
+            else alert("Error: " + data.error);
+        } catch (e) { alert("Network Error"); }
+    }
+
+    async function cancelFrame() {
+        if (!confirm("⚠️ DANGER: CANCEL THIS FRAME? This refunds 99% of bets and PAUSES the market.")) return;
+        
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
+        if (!pwd) return;
+
+        try {
+            const res = await fetch(`${API_URL}/admin/cancel-frame`, {
+                method: 'POST',
+                headers: { 'x-admin-secret': pwd } 
+            });
+            const data = await res.json();
+            if (data.success) alert("Frame Cancelled. Market Paused.");
+            else alert("Error: " + data.error);
+        } catch (e) { alert("Network Error"); }
+    }
+
+    async function poll() {
+        try {
+            const res = await fetch(`${API_URL}/state`);
+            const data = await res.json();
+
+            // Connection Status
+            ui.statusDot.classList.remove('bg-gray-500', 'bg-red-500');
+            ui.statusDot.classList.add('bg-green-500', 'blink');
+            ui.statusText.innerText = "ONLINE";
+            ui.statusText.classList.remove('text-red-500');
+            ui.statusText.classList.add('text-green-500');
+
+            // Game State Indicator (New)
+            if(data.isPaused) {
+                 ui.gameStateIndicator.innerText = "PAUSED ⏸";
+                 ui.gameStateIndicator.className = "text-base font-bold text-yellow-500 animate-pulse";
+            } else if (data.isResetting) {
+                 ui.gameStateIndicator.innerText = "RESETTING ⏳";
+                 ui.gameStateIndicator.className = "text-base font-bold text-blue-400 animate-pulse";
+            } else {
+                 ui.gameStateIndicator.innerText = "ACTIVE 🟢";
+                 ui.gameStateIndicator.className = "text-base font-bold text-green-500";
+            }
+
+            if (data.currentVolume !== undefined) ui.vol.innerText = `${data.currentVolume.toFixed(4)} SOL`;
+            if (data.uniqueUsers !== undefined) ui.users.innerText = data.uniqueUsers;
+            if (data.price) ui.price.innerText = `$${data.price.toFixed(2)}`;
+
+            if (data.msUntilClose) {
+                const m = Math.floor((data.msUntilClose % (1000 * 60 * 60)) / (1000 * 60));
+                const s = Math.floor((data.msUntilClose % (1000 * 60)) / 1000);
+                ui.timer.innerText = `${m}:${s.toString().padStart(2, '0')}`;
+            }
+
+            if (data.market) {
+                ui.upPrice.innerText = data.market.priceUp.toFixed(4) + " SOL";
+                ui.downPrice.innerText = data.market.priceDown.toFixed(4) + " SOL";
+                
+                const netUp = Math.max(0, data.market.sharesUp - 50);
+                const netDown = Math.max(0, data.market.sharesDown - 50);
+                
+                ui.upShares.innerText = Math.round(netUp).toLocaleString();
+                ui.downShares.innerText = Math.round(netDown).toLocaleString();
+            }
+
+            fullHistory = data.history || [];
+            renderHistory();
+
+        } catch (e) {
+            ui.statusDot.classList.remove('bg-green-500', 'blink');
+            ui.statusDot.classList.add('bg-red-500');
+            ui.statusText.innerText = "DISCONNECTED";
+            ui.statusText.classList.remove('text-green-500');
+            ui.statusText.classList.add('text-red-500');
+            ui.gameStateIndicator.innerText = "UNKNOWN";
+            ui.gameStateIndicator.className = "text-sm font-bold text-gray-500";
+        }
+    }
+
+    setInterval(poll, 2000);
+    poll();
+</script>
+
+}
