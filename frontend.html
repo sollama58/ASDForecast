@@ -1,4 +1,4 @@
-<!-- ASDForecast v117.0 // FIX: LEADERBOARD & HEADER IMAGE -->
+<!-- ASDForecast v118.0 // UI: REMOVED STATUS IMAGE -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -55,14 +55,17 @@
     .share-card { background: #1a0f0a; border: 2px solid #ea580c; padding: 20px; border-radius: 12px; max-width: 90%; width: 500px; text-align: center; }
     #share-preview { width: 100%; border-radius: 8px; border: 2px solid #7c2d12; margin-bottom: 15px; }
     
+    /* HISTORY MODAL SPECIFIC */
     .history-card { background: #1a0f0a; border: 2px solid #ea580c; border-radius: 12px; width: 90%; max-width: 900px; height: 80vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.8); }
 
     #wallet-modal { z-index: 9999; }
     
+    /* SCROLLBARS */
     .custom-scroll::-webkit-scrollbar { width: 8px; }
     .custom-scroll::-webkit-scrollbar-track { background: #2a1005; }
     .custom-scroll::-webkit-scrollbar-thumb { background: #ea580c; border-radius: 4px; }
 
+    /* BROADCAST STYLE */
     .broadcast-box {
         background: rgba(251, 146, 60, 0.1);
         border: 1px solid #ea580c;
@@ -98,9 +101,6 @@
                     <div id="last-updated" class="text-[10px] font-mono text-orange-500/50 mt-1 mr-1">Price Data: --:--:--</div>
                 </div>
                 <button id="connect-btn" class="bg-orange-600 border-2 border-orange-800 text-white px-6 py-2 rounded shadow-lg font-bold hover:bg-orange-500">Connect Phantom</button>
-                
-                <!-- NEW IMAGE LOCATION -->
-                <img id="header-status-img" src="" class="w-12 h-12 rounded border-2 border-orange-500 hidden object-cover shadow-[0_0_10px_rgba(255,165,0,0.5)]" alt="Result" onerror="this.classList.add('hidden')">
             </div>
         </div>
 
@@ -197,7 +197,6 @@
                                 <div class="flex justify-between items-center border-t border-orange-500/20 pt-1 mt-1"><span class="text-orange-300/70">Est. Win Payout:</span><span id="stat-payout" class="text-yellow-400 font-bold">0.00 SOL</span></div>
                             </div>
                             
-                            <!-- UPDATED: Your Last Frame Results -->
                             <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono">
                                 <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
                                 <div id="last-frame-stats" class="text-orange-200 italic opacity-50">Waiting for close...</div>
@@ -274,7 +273,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v117.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v118.0</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -337,7 +336,7 @@
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
     let PublicKey, SystemProgram, Transaction;
-    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null, images: { fine: null, over: null } };
+    let state = { pubKey: null, prices: { up: 0.05, down: 0.05 }, conn: null, fullHistory: [], lastFrameId: null, userLog: {}, isHistoryExpanded: false, isAboutExpanded: false, isOnline: false, targetEndTime: null, isResetting: false, isCancelled: false, baseImageSrc: null };
     let ui = {};
     let pollTimeout = null; // Store timeout ID for cleanup
 
@@ -370,7 +369,6 @@
             statActUp: document.getElementById('stat-active-up'), statActDown: document.getElementById('stat-active-down'),
             statPayout: document.getElementById('stat-payout'), lastFrameStats: document.getElementById('last-frame-stats'),
             aboutContent: document.getElementById('about-content'), aboutIcon: document.getElementById('about-icon'),
-            
             // RESTORED IDs
             statGlobalVol: document.getElementById('global-vol'), 
             statGlobalFees: document.getElementById('global-fees'), 
@@ -387,12 +385,9 @@
             
             // NEW UI ELEMENTS
             frameUsers: document.getElementById('frame-users'),
-            globalLastPayout: document.getElementById('link-last-payout'), 
+            globalLastPayout: document.getElementById('link-last-payout'), // Changed ID to target anchor tag
             globalWinnings: document.getElementById('global-winnings'),
             globalLifetimeUsers: document.getElementById('global-lifetime-users'),
-            
-            // IMAGE ELEMENTS
-            headerStatusImg: document.getElementById('header-status-img'), // NEW
             
             broadcastContainer: document.getElementById('admin-broadcast-container'),
             broadcastText: document.getElementById('broadcast-text'),
@@ -409,9 +404,7 @@
         ui.disconnect.onclick = disconnectWallet;
         ui.qty.oninput = () => { ui.qty.value = Math.floor(Math.max(1, ui.qty.value)); updateCosts(); };
 
-        // Fetch Images immediately
-        fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
-        fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
+        // Fetch Images immediately - REMOVED STATUS IMAGE FETCHING FOR CLEANUP
 
         // PAGE VISIBILITY OPTIMIZATION
         document.addEventListener("visibilitychange", () => {
@@ -839,42 +832,15 @@
                                 <div class="flex justify-between border-t border-white/10 mt-1 pt-1"><span>Result:</span> ${res}</div>
                              `;
                              
-                             // IMAGE UPDATE
-                             if (state.images) {
-                                 ui.headerStatusImg.classList.remove('hidden');
-                                 if (log.result === 'LOSS') {
-                                     ui.headerStatusImg.src = state.images.over || '';
-                                     ui.headerStatusImg.classList.add('border-red-500');
-                                     ui.headerStatusImg.classList.remove('border-green-500', 'border-orange-500');
-                                 } else {
-                                     ui.headerStatusImg.src = state.images.fine || ''; // WIN, REFUND, etc.
-                                     ui.headerStatusImg.classList.add('border-green-500');
-                                     ui.headerStatusImg.classList.remove('border-red-500', 'border-orange-500');
-                                 }
-                             }
+                             // STATUS IMAGE REMOVED AS REQUESTED
 
                         } else { 
                             // FIX: If user is connected but hasn't played or frame is active/pending close
                             ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; 
-                            if (state.images.fine) {
-                                ui.headerStatusImg.classList.remove('hidden');
-                                ui.headerStatusImg.src = state.images.fine; // Default image
-                                ui.headerStatusImg.classList.add('border-orange-500');
-                                ui.headerStatusImg.classList.remove('border-red-500', 'border-green-500');
-                            } else {
-                                ui.headerStatusImg.classList.add('hidden');
-                            }
                         }
                     } else {
                          // User is connected, but no history data yet
                          ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for first game...</span>`; 
-                         if (state.images.fine) {
-                            ui.headerStatusImg.classList.remove('hidden');
-                            ui.headerStatusImg.src = state.images.fine; // Default image
-                            ui.headerStatusImg.classList.add('border-orange-500');
-                        } else {
-                            ui.headerStatusImg.classList.add('hidden');
-                        }
                     }
                 }
                 renderHistory();
