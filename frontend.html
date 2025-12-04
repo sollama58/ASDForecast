@@ -1,4 +1,4 @@
-<!-- ASDForecast v125.0 // FIX: CONNECTION STABILITY & NULL CHECKS -->
+<!-- ASDForecast v125.1 // FIX: LAST FRAME DATA DISPLAY & SUBTITLE -->
 
 <!-- Dependencies -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -249,9 +249,11 @@
                             
                             <!-- LAST FRAME PERFORMANCE (UPDATED LAYOUT) -->
                             <div class="bg-black/50 p-2 rounded border border-orange-900/50 text-xs font-mono flex justify-between items-center gap-2">
-                                <div id="last-frame-stats" class="flex-grow">
+                                <div class="flex-grow">
+                                    <!-- STATIC HEADER -->
                                     <span class="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">YOUR LAST FRAME RESULTS</span>
-                                    <div class="text-orange-200 italic opacity-50">Waiting for close...</div>
+                                    <!-- DYNAMIC CONTENT -->
+                                    <div id="last-frame-data" class="text-orange-200 italic opacity-50">Waiting for close...</div>
                                 </div>
                             </div>
                         </div>
@@ -329,7 +331,7 @@
                 <div class="mt-6 border-t-2 border-red-900/50 pt-4 bg-red-900/10 p-4 rounded"><strong class="text-red-500 block mb-1 text-lg">⚠️ DISCLAIMER & RISK WARNING</strong><p class="text-xs text-orange-200 leading-relaxed">This platform is currently LIVE on Solana Mainnet. The operators are not responsible for lost funds, smart contract errors, oracle latency, or network failures. <br><br><strong>PREDICT RESPONSIBLY:</strong> Never wager funds you cannot afford to lose. This is an experimental technology demonstration.</p></div>
             </div>
         </div>
-        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v125.0</span> | Backend <span id="backend-version">v---</span></div>
+        <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v125.1</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
     <!-- SHARE MODAL -->
@@ -423,8 +425,13 @@
             historyRows: document.getElementById('history-rows'), historyContainer: document.getElementById('history-container'), btnExpand: document.getElementById('btn-expand-history'),
             statsContainer: document.getElementById('user-stats-container'), statWin: document.getElementById('stat-winrate'), statVol: document.getElementById('stat-volume'),
             statActUp: document.getElementById('stat-active-up'), statActDown: document.getElementById('stat-active-down'),
-            statPayout: document.getElementById('stat-payout'), lastFrameStats: document.getElementById('last-frame-stats'),
+            statPayout: document.getElementById('stat-payout'), 
+            
+            // UPDATE: Mapped to the new ID
+            lastFrameStats: document.getElementById('last-frame-data'),
+            
             aboutContent: document.getElementById('about-content'), aboutIcon: document.getElementById('about-icon'),
+            
             // RESTORED IDs
             statGlobalVol: document.getElementById('global-vol'), 
             statGlobalFees: document.getElementById('global-fees'), 
@@ -646,27 +653,63 @@
 
     function renderHistory() {
         if (!state.fullHistory || state.fullHistory.length === 0) { ui.historyRows.innerHTML = '<tr><td colspan="6" class="py-2 italic opacity-50">Waiting for first frame close...</td></tr>'; return; }
-        const now = Date.now(); const validHistory = state.fullHistory.filter(f => (f.endTime || 0) <= now); const dataToShow = validHistory.slice(0, 3);
+        const now = Date.now();
+        const validHistory = state.fullHistory.filter(f => (f.endTime || 0) <= now);
+        const dataToShow = state.isHistoryExpanded ? validHistory.slice(0, 50) : validHistory.slice(0, 3);
+
         ui.historyRows.innerHTML = dataToShow.map(f => {
-            const timeVal = f.endTime ? f.endTime : f.time; const time = new Date(timeVal).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            // MODIFIED: Use endTime for display time if available, fallback to start time
+            const timeVal = f.endTime ? f.endTime : f.time;
+            const time = new Date(timeVal).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            
             let resColor = f.result==='UP'?'text-green-400':(f.result==='DOWN'?'text-red-400':(f.result==='CANCELLED'?'text-red-600 font-bold':(f.result==='PAUSED'?'text-yellow-500 font-bold':'text-gray-400')));
             let userStatus = '<span class="text-gray-600">-</span>';
-            if (f.result === 'PAUSED') userStatus = `<span class="text-yellow-500">SKIPPED</span>`; else if (f.result === 'CANCELLED') { if (state.userLog && state.userLog[f.id]) userStatus = `<span class="text-yellow-400 font-bold">REFUNDED</span>`; } 
-            else if (state.userLog && state.userLog[f.id]) { const log = state.userLog[f.id]; if (log.result === 'LOSS') userStatus = `<span class="text-red-500 font-bold">LOSS (${(log.wagered||0).toFixed(3)})</span>`; else if (log.result === 'REFUNDED_ERROR') userStatus = `<span class="text-yellow-500 font-bold">⚠️ ERR: REFUNDED</span>`; else if (log.payoutTx) userStatus = `<a href="https://solscan.io/tx/${log.payoutTx}" target="_blank" class="text-green-400 underline">WIN (+${log.payoutAmount?.toFixed(3)})</a>`; else if (log.result === 'WIN') userStatus = `<span class="text-green-600">WIN (Processing)</span>`; }
+            
+            if (f.result === 'PAUSED') {
+                 userStatus = `<span class="text-yellow-500">SKIPPED</span>`;
+            } else if (f.result === 'CANCELLED') {
+                 if (state.userLog && state.userLog[f.id]) userStatus = `<span class="text-yellow-400 font-bold">REFUNDED</span>`;
+            } else if (state.userLog && state.userLog[f.id]) {
+                const log = state.userLog[f.id];
+                if (log.result === 'LOSS') userStatus = `<span class="text-red-500 font-bold">LOSS (${(log.wagered||0).toFixed(3)})</span>`;
+                // UPDATE: Handle REFUNDED_ERROR status from backend
+                else if (log.result === 'REFUNDED_ERROR') userStatus = `<span class="text-yellow-500 font-bold">⚠️ ERR: REFUNDED</span>`;
+                else if (log.payoutTx) userStatus = `<a href="https://solscan.io/tx/${log.payoutTx}" target="_blank" class="text-green-400 underline">WIN (+${log.payoutAmount?.toFixed(3)})</a>`;
+                else if (log.result === 'WIN') userStatus = `<span class="text-green-600">WIN (Processing)</span>`;
+            }
             return `<tr class="border-b border-orange-900/20"><td class="py-2">${time}</td><td class="py-2 font-bold ${resColor}">${f.result}</td><td class="py-2">$${(f.open||0).toFixed(2)}</td><td class="py-2">$${(f.close||0).toFixed(2)}</td><td class="py-2">${(f.totalSol||0).toFixed(2)}</td><td class="py-2">${userStatus}</td></tr>`;
         }).join('');
+        if(state.fullHistory.length > 3) ui.btnExpand.classList.remove('hidden');
     }
 
-    function renderTicker(trades) { if(!trades || !ui.ticker) return; ui.ticker.innerHTML = trades.slice(0,10).map(t => `<div class="ticker-item">[ ${t.user.slice(0,4)}.. bought <span class="${t.direction==='UP'?'text-green-400':'text-red-400'}">${t.shares.toFixed(1)} ${t.direction}</span> ]</div>`).join(''); }
-    function renderLeaderboard(data) { if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Data Yet</td></tr>'; return; } ui.leaderboardRows.innerHTML = data.map((user, index) => `<tr class="border-b border-orange-900/20"><td class="py-2 text-white font-bold"><span class="text-orange-500 mr-2">#${index+1}</span> ${user.pubKey.slice(0,5)}...</td><td class="py-2 text-right text-gray-300">${user.bets}</td><td class="py-2 text-right text-yellow-400">${user.winRate.toFixed(0)}%</td><td class="py-2 text-right text-green-400 font-bold">${user.totalWon.toFixed(2)} SOL</td></tr>`).join(''); }
+    function renderTicker(trades) {
+        if(!trades || !ui.ticker) return;
+        ui.ticker.innerHTML = trades.slice(0,10).map(t => `<div class="ticker-item">[ ${t.user.slice(0,4)}.. bought <span class="${t.direction==='UP'?'text-green-400':'text-red-400'}">${t.shares.toFixed(1)} ${t.direction}</span> ]</div>`).join('');
+    }
+
+    function renderLeaderboard(data) {
+        if (!data || data.length === 0) { ui.leaderboardRows.innerHTML = '<tr><td colspan="4" class="py-2 italic opacity-50 text-center">No Data Yet</td></tr>'; return; }
+        ui.leaderboardRows.innerHTML = data.map((user, index) => `
+            <tr class="border-b border-orange-900/20">
+                <td class="py-2 text-white font-bold"><span class="text-orange-500 mr-2">#${index+1}</span> ${user.pubKey.slice(0,5)}...</td>
+                <td class="py-2 text-right text-gray-300">${user.bets}</td>
+                <td class="py-2 text-right text-yellow-400">${user.winRate.toFixed(0)}%</td>
+                <td class="py-2 text-right text-green-400 font-bold">${user.totalWon.toFixed(2)} SOL</td>
+            </tr>
+        `).join('');
+    }
 
     async function poll() {
+        // Prevent polling if tab hidden (redundant check for safety)
         if (document.hidden) return;
+        
+        // Safety guard: Ensure UI is initialized
         if (!ui || !ui.price) return;
 
         try {
-            let url = `${API_URL}/state`; if(state.pubKey) url += `?user=${state.pubKey.toString()}`;
-            const res = await fetch(url); 
+            let url = `${API_URL}/state`;
+            if(state.pubKey) url += `?user=${state.pubKey.toString()}`;
+            const res = await fetch(url);
             
             // HANDLE 503 (INITIALIZING)
             if(res.status === 503) {
@@ -678,94 +721,252 @@
 
             if(!res.ok) throw new Error(res.statusText); const data = await res.json();
             
-            state.isOnline = true; ui.statusText.innerText = "ONLINE"; ui.statusText.className = "text-green-400"; ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-green-900/50 transition-colors duration-500";
-            if(ui.lastUpdated && data.lastPriceTimestamp) ui.lastUpdated.innerText = `Price Data: ${new Date(data.lastPriceTimestamp).toLocaleTimeString()}`; if(data.backendVersion) ui.backendVersion.innerText = `v${data.backendVersion}`;
-            state.isResetting = data.isResetting; state.isCancelled = data.isCancelled;
+            state.isOnline = true;
+            // UPDATE: Reset status display to default
+            ui.statusText.innerText = "ONLINE"; 
+            ui.statusText.className = "text-green-400";
+            ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-green-900/50 transition-colors duration-500";
+            if(ui.lastUpdated && data.lastPriceTimestamp) ui.lastUpdated.innerText = `Price Data: ${new Date(data.lastPriceTimestamp).toLocaleTimeString()}`;
+            if(data.backendVersion) ui.backendVersion.innerText = `v${data.backendVersion}`;
 
-            if (data.isResetting) { ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "RESETTING"; ui.statusText.className = "text-blue-400"; if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; } ui.timer.innerText = "Resetting..."; }
-            else if (data.isCancelled) { ui.netSharesHeader.innerText = "FRAME CANCELLED"; ui.netSharesHeader.classList.add("text-red-500"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "CANCELLED"; ui.statusText.className = "text-red-500"; if(ui.pauseText) { ui.pauseText.innerText = "FRAME CANCELLED - funds refunded"; ui.pauseText.className = "text-red-500 font-bold text-xl"; } }
-            else if (data.isPaused) { ui.netSharesHeader.innerText = "MARKET PAUSED"; ui.netSharesHeader.classList.add("text-red-500"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); ui.statusText.innerText = "PAUSED"; ui.statusText.className = "text-yellow-500"; ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-yellow-900/50"; if(ui.pauseText) { ui.pauseText.innerText = "FRAME PAUSED"; ui.pauseText.className = "text-yellow-500 font-bold text-xl"; } }
-            else { if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true; ui.pauseOverlay.classList.remove('hidden'); if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; } } else { ui.netSharesHeader.innerText = "Net Shares Bought"; ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse"); ui.btnUp.disabled = false; ui.btnDown.disabled = false; ui.qty.disabled = false; ui.pauseOverlay.classList.add('hidden'); } }
+            // --- STATE SYNC ---
+            state.isResetting = data.isResetting;
+            state.isCancelled = data.isCancelled;
 
-            if (data.market) {
-                state.prices = { up: data.market.priceUp, down: data.market.priceDown }; if(data.market.changes) { formatChange(ui.up1m, data.market.changes.up1m); formatChange(ui.up5m, data.market.changes.up5m); formatChange(ui.down1m, data.market.changes.down1m); formatChange(ui.down5m, data.market.changes.down5m); }
-                const nU = Math.max(0, data.market.sharesUp-50), nD = Math.max(0, data.market.sharesDown-50); ui.lblSharesUp.innerText = nU.toFixed(0); ui.lblSharesDown.innerText = nD.toFixed(0); const total = nU + nD || 1; ui.barUp.style.width = `${(nU/total)*100}%`; ui.barDown.style.width = `${(nD/total)*100}%`; ui.lblPriceUp.innerText = state.prices.up.toFixed(3); ui.lblPriceDown.innerText = state.prices.down.toFixed(3);
+            if (data.isResetting) {
+                ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse"); ui.netSharesHeader.classList.remove("text-red-500");
+                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                ui.pauseOverlay.classList.remove('hidden');
+                ui.statusText.innerText = "RESETTING"; ui.statusText.className = "text-blue-400";
+                if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; }
+                ui.timer.innerText = "Resetting..."; // Immediate feedback
             }
-            
-            ui.price.innerText = `$${data.price.toFixed(2)}`; const diff = data.price - data.openPrice; const color = diff >= 0 ? 'text-green-400' : 'text-red-500'; ui.change.innerHTML = `<span class="${color}">${diff>=0?'+':''}${diff.toFixed(2)} (${data.change.toFixed(2)}%)</span>`;
-            if(data.candleStartTime) { ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); state.targetEndTime = data.candleEndTime; }
-            if(data.currentVolume !== undefined) ui.currentPot.innerText = `${data.currentVolume.toFixed(3)} SOL`;
-
-            state.fullHistory = data.history || [];
-            
-            // FIX: NULL CHECKS
-            if(data.platformStats) { 
-                ui.statGlobalVol.innerText = `${(data.platformStats.totalVolume || 0).toFixed(2)} SOL`; 
-                ui.statGlobalFees.innerText = `${(data.platformStats.totalFees || 0).toFixed(3)} SOL`; 
-                if(ui.statGlobalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF || 0).toLocaleString() + " ASDF"; 
+            else if (data.isCancelled) {
+                ui.netSharesHeader.innerText = "FRAME CANCELLED"; ui.netSharesHeader.classList.add("text-red-500"); 
+                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                ui.pauseOverlay.classList.remove('hidden');
+                ui.statusText.innerText = "CANCELLED"; ui.statusText.className = "text-red-500";
+                if(ui.pauseText) { ui.pauseText.innerText = "FRAME CANCELLED - funds refunded"; ui.pauseText.className = "text-red-500 font-bold text-xl"; }
             }
-
-            if(data.uniqueUsers !== undefined) ui.frameUsers.innerText = data.uniqueUsers; 
-            if(data.totalLifetimeUsers && ui.globalLifetimeUsers) ui.globalLifetimeUsers.innerText = data.totalLifetimeUsers.toLocaleString(); 
-            if(data.totalWinnings !== undefined && ui.globalWinnings) ui.globalWinnings.innerText = `${data.totalWinnings.toFixed(2)} SOL`;
-            
-            if (data.lastFramePot !== undefined) { const statusIcon = data.payoutQueueLength === 0 ? "✅" : "⏳"; ui.globalLastPayout.innerText = `${statusIcon} ${data.lastFramePot.toFixed(2)} SOL`; }
-            if (data.broadcast && data.broadcast.isActive && data.broadcast.message) { ui.broadcastContainer.classList.remove('hidden'); ui.broadcastText.innerText = data.broadcast.message; } else { ui.broadcastContainer.classList.add('hidden'); }
-            
-            // UPDATE: SENTIMENT UI (POLLING)
-            if (data.hourlySentiment) {
-                const sUp = data.hourlySentiment.up;
-                const sDown = data.hourlySentiment.down;
-                const sTotal = sUp + sDown || 1;
-                ui.valSentUp.innerText = sUp;
-                ui.valSentDown.innerText = sDown;
-                
-                // FIX: Progress Bar Calculation
-                const upPercent = sTotal > 0 ? (sUp / sTotal) * 100 : 50;
-                ui.sentBarFill.style.width = `${upPercent}%`;
-                
-                if (sUp > sDown) { ui.sentBarFill.style.backgroundColor = '#22c55e'; }
-                else if (sDown > sUp) { ui.sentBarFill.style.backgroundColor = '#ef4444'; }
-                else { ui.sentBarFill.style.backgroundColor = '#fb923c'; }
-
-                // Calc Time
-                const now = Date.now();
-                if (data.hourlySentiment.nextReset > now) {
-                     const totalSeconds = Math.floor((data.hourlySentiment.nextReset - now) / 1000);
-                     const mins = Math.floor(totalSeconds / 60); // Updated to min only for hourly/daily
-                     const hours = Math.floor(mins / 60);
-                     const displayMins = mins % 60;
-                     ui.sentTimer.innerText = `Reset: ${hours}h ${displayMins}m`;
+            else if (data.isPaused) {
+                ui.netSharesHeader.innerText = "MARKET PAUSED"; ui.netSharesHeader.classList.add("text-red-500"); 
+                ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                ui.pauseOverlay.classList.remove('hidden');
+                ui.statusText.innerText = "PAUSED"; ui.statusText.className = "text-yellow-500";
+                ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-yellow-900/50";
+                if(ui.pauseText) { ui.pauseText.innerText = "FRAME PAUSED"; ui.pauseText.className = "text-yellow-500 font-bold text-xl"; }
+            } else {
+                // LOCAL LOCKDOWN CHECK
+                if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) {
+                     // Local timer says closed, waiting for backend
+                     ui.netSharesHeader.innerText = "CALCULATING RESULTS..."; ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse");
+                     ui.btnUp.disabled = true; ui.btnDown.disabled = true; ui.qty.disabled = true;
+                     ui.pauseOverlay.classList.remove('hidden');
+                     if(ui.pauseText) { ui.pauseText.innerText = "CALCULATING RESULTS..."; ui.pauseText.className = "text-blue-400 font-bold text-xl"; }
                 } else {
-                     ui.sentTimer.innerText = `Resetting...`;
+                     // OPEN
+                     ui.netSharesHeader.innerText = "Net Shares Bought"; ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse");
+                     ui.btnUp.disabled = false; ui.btnDown.disabled = false; ui.qty.disabled = false;
+                     ui.pauseOverlay.classList.add('hidden');
                 }
             }
+
+            try {
+                if (data.market) {
+                    state.prices = { up: data.market.priceUp, down: data.market.priceDown };
+                    if(data.market.changes) { formatChange(ui.up1m, data.market.changes.up1m); formatChange(ui.up5m, data.market.changes.up5m); formatChange(ui.down1m, data.market.changes.down1m); formatChange(ui.down5m, data.market.changes.down5m); }
+                    const nU = Math.max(0, data.market.sharesUp-50), nD = Math.max(0, data.market.sharesDown-50);
+                    ui.lblSharesUp.innerText = nU.toFixed(0); ui.lblSharesDown.innerText = nD.toFixed(0);
+                    const total = nU + nD || 1;
+                    ui.barUp.style.width = `${(nU/total)*100}%`; ui.barDown.style.width = `${(nD/total)*100}%`;
+                    ui.lblPriceUp.innerText = state.prices.up.toFixed(3); ui.lblPriceDown.innerText = state.prices.down.toFixed(3);
+                }
+                
+                ui.price.innerText = `$${data.price.toFixed(2)}`;
+                const diff = data.price - data.openPrice;
+                const color = diff >= 0 ? 'text-green-400' : 'text-red-500';
+                ui.change.innerHTML = `<span class="${color}">${diff>=0?'+':''}${diff.toFixed(2)} (${data.change.toFixed(2)}%)</span>`;
+                
+                if(data.candleStartTime) {
+                     ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                     ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+                     state.targetEndTime = data.candleEndTime;
+                }
+
+                const ms = data.msUntilClose;
+                // ui.timer.innerText update moved to updateTimer()
+                if(data.currentVolume !== undefined) ui.currentPot.innerText = `${data.currentVolume.toFixed(3)} SOL`;
+
+                state.fullHistory = data.history || [];
+                
+                // UPDATE: Fill new stats fields with Fallbacks
+                if(data.platformStats) {
+                    // RESTORED OLD STATS (Fixes Ghost Element Bug)
+                    // Using || 0 ensures no "undefined" or "NaN" if data is fresh
+                    if (ui.statGlobalVol) ui.statGlobalVol.innerText = `${(data.platformStats.totalVolume || 0).toFixed(2)} SOL`;
+                    if (ui.statGlobalFees) ui.statGlobalFees.innerText = `${(data.platformStats.totalFees || 0).toFixed(3)} SOL`;
+                    if (ui.statGlobalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF || 0).toLocaleString() + " ASDF";
+                }
+                
+                // New Fields
+                if (data.uniqueUsers !== undefined) ui.frameUsers.innerText = data.uniqueUsers;
+                if (data.totalLifetimeUsers) ui.globalLifetimeUsers.innerText = data.totalLifetimeUsers.toLocaleString();
+                if (data.totalWinnings !== undefined) ui.globalWinnings.innerText = `${data.totalWinnings.toFixed(2)} SOL`;
+                
+                if (data.lastFramePot !== undefined) {
+                    const statusIcon = data.payoutQueueLength === 0 ? "✅" : "⏳";
+                    // Using innerText preserves the styling of the anchor tag
+                    ui.globalLastPayout.innerText = `${statusIcon} ${data.lastFramePot.toFixed(2)} SOL`;
+                }
+
+                if (data.broadcast && data.broadcast.isActive && data.broadcast.message) {
+                    ui.broadcastContainer.classList.remove('hidden');
+                    ui.broadcastText.innerText = data.broadcast.message;
+                } else {
+                    ui.broadcastContainer.classList.add('hidden');
+                }
+
+                if(data.userStats) {
+                    state.userLog = data.userStats.frameLog || {};
+                    ui.statsContainer.classList.remove('hidden');
+                    const total = data.userStats.wins + data.userStats.losses;
+                    const rate = total > 0 ? ((data.userStats.wins/total)*100).toFixed(0) : 0;
+                    ui.statWin.innerText = `${rate}% (${data.userStats.wins}/${total})`;
+                    ui.statVol.innerText = `${data.userStats.totalSol.toFixed(3)} SOL`;
+                    
+                    // LAST FRAME PERF (Check if Closed)
+                    if (state.fullHistory.length > 0) {
+                        const last = state.fullHistory[0];
+                        const nowTime = Date.now();
+                        if (last.endTime < nowTime && state.userLog[last.id]) {
+                             const log = state.userLog[last.id];
+                             let res = log.result === 'WIN' ? `<span class="text-green-400">WIN</span>` : `<span class="text-red-400">LOSS</span>`;
+                             if (log.result === 'CANCELLED') res = `<span class="text-yellow-500">REFUNDED</span>`;
+                             // UPDATE: Check for Refunded Error
+                             if (log.result === 'REFUNDED_ERROR') res = `<span class="text-yellow-500 font-bold">⚠️ REFUNDED</span>`;
+                             
+                             // TEXT UPDATE
+                             ui.lastFrameStats.innerHTML = `
+                                <div class="flex justify-between"><span>Vol:</span> <span>${last.totalSol.toFixed(2)} SOL</span></div>
+                                <div class="flex justify-between text-[10px] border-t border-white/10 pt-1 mt-1">
+                                    <span class="text-green-400">UP: ${Math.round(log.upShares||0)}</span> <span class="text-red-400">DOWN: ${Math.round(log.downShares||0)}</span>
+                                </div>
+                                <div class="flex justify-between border-t border-white/10 mt-1 pt-1"><span>Result:</span> ${res}</div>
+                             `;
+                             
+                             // IMAGE UPDATE removed by request
+
+                        } else { 
+                            // FIX: If user is connected but hasn't played or frame is active/pending close
+                            ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; 
+                        }
+                    } else {
+                         // User is connected, but no history data yet
+                         ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for first game...</span>`; 
+                    }
+                }
+                renderHistory();
+                if(data.recentTrades) renderTicker(data.recentTrades);
+                if(data.leaderboard) renderLeaderboard(data.leaderboard);
+
+                if(data.activePosition) {
+                    const uS = data.activePosition.upShares || 0;
+                    const uV = data.activePosition.upSol || 0;
+                    const dS = data.activePosition.downShares || 0;
+                    const dV = data.activePosition.downSol || 0;
+
+                    // FIXED FORMAT: SHARES (SOL)
+                    if (ui.statActUp) ui.statActUp.innerHTML = `${Math.round(uS)} <span class="text-gray-500">(${uV.toFixed(2)} SOL)</span>`;
+                    if (ui.statActDown) ui.statActDown.innerHTML = `${Math.round(dS)} <span class="text-gray-500">(${dV.toFixed(2)} SOL)</span>`;
+                    
+                    const pot = (data.currentVolume || 0) * 0.94;
+                    let est = 0;
+                    if (data.market) {
+                        if (uS > dS) {
+                            const totalRealUp = Math.max(1, data.market.sharesUp - 50);
+                            est = (uS / totalRealUp) * pot;
+                        } else if (dS > uS) {
+                            const totalRealDown = Math.max(1, data.market.sharesDown - 50);
+                            est = (dS / totalRealDown) * pot;
+                        }
+                    }
+                    ui.statPayout.innerText = est.toFixed(3) + " SOL";
+                }
+            } catch(e) { console.log("Stats Render Error", e); }
             
-            // FIX: Image Population
-            if (state.images.sentUp) ui.imgSentUp.src = state.images.sentUp; else ui.imgSentUp.style.display='none';
-            if (state.images.sentDown) ui.imgSentDown.src = state.images.sentDown; else ui.imgSentDown.style.display='none';
+            updateCosts();
 
-
-            if(data.userStats) {
-                state.userLog = data.userStats.frameLog || {}; ui.statsContainer.classList.remove('hidden'); const total = data.userStats.wins + data.userStats.losses; const rate = total > 0 ? ((data.userStats.wins/total)*100).toFixed(0) : 0; ui.statWin.innerText = `${rate}% (${data.userStats.wins}/${total})`; ui.statVol.innerText = `${data.userStats.totalSol.toFixed(3)} SOL`;
-                if (state.fullHistory.length > 0) { const last = state.fullHistory[0]; const nowTime = Date.now(); if (last.endTime < nowTime && state.userLog[last.id]) { const log = state.userLog[last.id]; let res = log.result === 'WIN' ? `<span class="text-green-400">WIN</span>` : `<span class="text-red-400">LOSS</span>`; if (log.result === 'CANCELLED') res = `<span class="text-yellow-500">REFUNDED</span>`; else if (log.result === 'REFUNDED_ERROR') res = `<span class="text-yellow-500 font-bold">⚠️ ERR: REFUNDED</span>`; else if (log.payoutTx) res = `<a href="https://solscan.io/tx/${log.payoutTx}" target="_blank" class="text-green-400 underline">WIN (+${log.payoutAmount?.toFixed(3)})</a>`; else if (log.result === 'WIN') res = `<span class="text-green-600">WIN (Processing)</span>`; } else { ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; } }
-            }
-            renderHistory(); renderLeaderboard(data.leaderboard); if(data.recentTrades) renderTicker(data.recentTrades);
-            if(data.activePosition) { const uS = data.activePosition.upShares || 0; const uV = data.activePosition.upSol || 0; const dS = data.activePosition.downShares || 0; const dV = data.activePosition.downSol || 0; if (ui.statActUp) ui.statActUp.innerHTML = `${Math.round(uS)} <span class="text-gray-500">(${uV.toFixed(2)} SOL)</span>`; if (ui.statActDown) ui.statActDown.innerHTML = `${Math.round(dS)} <span class="text-gray-500">(${dV.toFixed(2)} SOL)</span>`; const pot = (data.currentVolume || 0) * 0.94; let est = 0; if (data.market) { if (uS > dS) { const totalRealUp = Math.max(1, data.market.sharesUp - 50); est = (uS / totalRealUp) * pot; } else if (dS > uS) { const totalRealDown = Math.max(1, data.market.sharesDown - 50); est = (dS / totalRealDown) * pot; } } ui.statPayout.innerText = est.toFixed(3) + " SOL"; }
-        } catch(e) { console.error(e); state.isOnline = false; if(ui.topStatus) ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-red-900/50 transition-colors duration-500"; if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; } } 
-        finally { const jitter = Math.floor(Math.random() * 400); pollTimeout = setTimeout(poll, 2000 + jitter); }
+        } catch(e) {
+            console.error(e);
+            state.isOnline = false;
+            // Removed custom messaging here to let the status indicator default
+            if(ui.topStatus) ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-red-900/50 transition-colors duration-500";
+            if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; }
+        } finally {
+            // Recursive polling with Jitter (0-400ms)
+            const jitter = Math.floor(Math.random() * 400);
+            pollTimeout = setTimeout(poll, 2000 + jitter);
+        }
     }
 
     async function buy(dir) {
-        if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) { alert("Market has closed. Calculating results."); return; }
+
+        // LOCAL LOCKDOWN
+
+        if (state.targetEndTime && state.targetEndTime <= Date.now() + 500) {
+
+            alert("Market has closed. Calculating results.");
+            return;
+
+        }
+
+
+
         if(!state.isOnline) return alert("System Offline");
-        const qty = parseInt(ui.qty.value); const cost = qty * (dir==='UP'?state.prices.up:state.prices.down); const btn = dir==='UP'?ui.btnUp:ui.btnDown; const old = btn.innerHTML; btn.innerHTML = "SIGNING..."; btn.disabled = true;
+
+        const qty = parseInt(ui.qty.value);
+
+        const cost = qty * (dir==='UP'?state.prices.up:state.prices.down);
+
+        const btn = dir==='UP'?ui.btnUp:ui.btnDown;
+
+        const old = btn.innerHTML;
+
+        btn.innerHTML = "SIGNING..."; btn.disabled = true;
+
+
+
         try {
-            const tx = new Transaction(); const { blockhash } = await state.conn.getLatestBlockhash(); tx.recentBlockhash = blockhash; tx.feePayer = state.pubKey;
+
+            const tx = new Transaction();
+
+            const { blockhash } = await state.conn.getLatestBlockhash();
+
+            tx.recentBlockhash = blockhash; tx.feePayer = state.pubKey;
+
             tx.add(SystemProgram.transfer({ fromPubkey: state.pubKey, toPubkey: new PublicKey(HOUSE_PUBKEY), lamports: Math.round(cost * solanaWeb3.LAMPORTS_PER_SOL) }));
-            const sig = await window.solana.signAndSendTransaction(tx); btn.innerHTML = "VERIFYING..."; await state.conn.confirmTransaction(sig.signature, 'confirmed');
+
+            const sig = await window.solana.signAndSendTransaction(tx);
+
+            btn.innerHTML = "VERIFYING...";
+
+            await state.conn.confirmTransaction(sig.signature, 'confirmed');
+
             const res = await fetch(`${API_URL}/verify-bet`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ signature: sig.signature, direction: dir, userPubKey: state.pubKey.toString() }) });
-            const d = await res.json(); if(d.success) { alert(`Bought ${Math.round(d.shares)} shares!`); refreshBalance(); } else alert(d.error);
-        } catch(e) { console.error(e); alert("Tx Failed"); } finally { btn.innerHTML = old; btn.disabled = false; }
+
+            const d = await res.json();
+
+            if(d.success) { 
+                alert(`Bought ${Math.round(d.shares)} shares!`);
+                refreshBalance(); 
+            } else { 
+                alert(d.error);
+            }
+
+        } catch(e) { 
+            console.error(e); 
+            alert("Tx Failed");
+        } finally { btn.innerHTML = old; btn.disabled = false; }
+
     }
 </script>
