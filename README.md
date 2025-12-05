@@ -67,11 +67,17 @@ python3 -m http.server 8080
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/state` | GET | Current game state |
+| `/api/health` | GET | Service health status |
+| `/api/metrics` | GET | Prometheus metrics |
 | `/api/verify-bet` | POST | Verify a bet transaction |
 | `/api/sentiment/vote` | POST | Submit sentiment vote |
 | `/api/lottery/status` | GET | Lottery status |
 | `/api/lottery/eligibility` | GET | Check wallet eligibility |
 | `/api/lottery/history` | GET | Past lottery draws |
+| `/api/referral/code` | GET | Get/create referral code |
+| `/api/referral/register` | POST | Register with referral code |
+| `/api/referral/stats` | GET | Referral statistics |
+| `/api/referral/claim` | POST | Claim referral rewards |
 
 ### Admin (requires `x-admin-secret` header)
 | Endpoint | Method | Description |
@@ -106,8 +112,50 @@ python3 -m http.server 8080
 
 ## Version
 
-- **Backend**: v147.0
+- **Backend**: v148.0
 - **Frontend**: v122.0
+
+## Security
+
+### Frontend Helius API Key
+
+The frontend (`frontend.html:548`) contains a Helius RPC key for client-side Solana connections. This is intentional for browser wallet interactions.
+
+**Important:** Configure origin restrictions in your [Helius Dashboard](https://dashboard.helius.dev):
+- Allowed origins: `https://yourdomain.com`, `http://localhost:*`
+- This prevents unauthorized usage from other domains.
+
+### Rate Limiting
+
+| Endpoint Type | Limit | Window |
+|---------------|-------|--------|
+| State polling | 120 req | 1 min |
+| Bet submission | 10 req | 1 min |
+| Sentiment vote | 1 req | 1 hour |
+| Referral claim | 3 req | 5 min |
+| Referral register | 5 req | 1 min |
+
+### Admin Authentication
+
+All `/api/admin/*` endpoints require `x-admin-secret` header matching `ADMIN_ACTION_PASSWORD` env var.
+
+## Monitoring
+
+### Health Check
+
+```bash
+curl http://localhost:3000/api/health
+```
+
+Returns service status for RPC, PumpSwap pool, and Pyth oracle.
+
+### Prometheus Metrics
+
+```bash
+curl http://localhost:3000/api/metrics
+```
+
+Compatible with Prometheus/Grafana. Exposes: uptime, volume, fees, users, queue length, prices, lottery pool, memory usage.
 
 ## License
 

@@ -2,6 +2,7 @@ require('dotenv').config({ override: true });
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const config = require('./config');
 const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction, ComputeBudgetProgram } = require('@solana/web3.js');
 const { getOrCreateAssociatedTokenAccount, createTransferInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const axios = require('axios');
@@ -28,24 +29,16 @@ app.get('/status', (req, res) => res.sendFile(path.join(__dirname, 'status_monit
 
 const PORT = process.env.PORT || 3000;
 
-// --- CONFIGURATION ---
+// --- CONFIGURATION (from config.js) ---
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
-const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
-const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
+const FEE_WALLET = new PublicKey(config.FEE_WALLET);
+const UPKEEP_WALLET = new PublicKey(config.UPKEEP_WALLET);
+const PYTH_HERMES_URL = config.PYTH_HERMES_URL;
+const SOL_FEED_ID = config.SOL_FEED_ID;
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || "";
 
-const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
-
-// --- PUMPSWAP POOL CONFIG (On-chain price source) ---
-const PUMPSWAP_POOL = {
-    POOL_ADDRESS: "DuhRX5JTPtsWU5n44t8tcFEfmzy2Eu27p4y6z8Rhf2bb",
-    BASE_TOKEN_ACCOUNT: "9NXgzYh3ZhrqiLn994fhkGx7ikAUbEcWux9SGuxyXq2z",   // ASDF reserve
-    QUOTE_TOKEN_ACCOUNT: "HmmH9j2BHmJHQDRGMswBMccMfsr6jknGTux3wFqmXrya",  // SOL reserve
-    BASE_DECIMALS: 6,
-    QUOTE_DECIMALS: 9
-};
+const ASDF_MINT = config.ASDF_MINT;
+const PUMPSWAP_POOL = config.PUMPSWAP_POOL;
 
 // --- STARTUP VALIDATION ---
 if (!process.env.HELIUS_API_KEY) {
@@ -54,50 +47,31 @@ if (!process.env.HELIUS_API_KEY) {
 }
 console.log(`✓ HELIUS_API_KEY loaded (${process.env.HELIUS_API_KEY.slice(0,8)}...)`);
 
-const PRICE_SCALE = 0.1;
-const PAYOUT_MULTIPLIER = 0.94;
-const FEE_PERCENT = 0.0552;
-const UPKEEP_PERCENT = 0.0048;
-const FRAME_DURATION = 15 * 60 * 1000;
-const BACKEND_VERSION = "147.0"; // UPDATE: Referral + Lottery + External Tracking Merge
+// --- GAME ECONOMY (from config.js) ---
+const PRICE_SCALE = config.PRICE_SCALE;
+const PAYOUT_MULTIPLIER = config.PAYOUT_MULTIPLIER;
+const FEE_PERCENT = config.FEE_PERCENT;
+const UPKEEP_PERCENT = config.UPKEEP_PERCENT;
+const FRAME_DURATION = config.FRAME_DURATION_MS;
+const BACKEND_VERSION = config.BACKEND_VERSION;
+const PRIORITY_FEE_UNITS = config.PRIORITY_FEE_UNITS;
 
-// --- LOTTERY CONFIG ---
-const LOTTERY_CONFIG = {
-    ELIGIBILITY_PERCENT: 0.0000552,      // 0.00552% of circulating supply (552/1M)
-    MAX_TICKETS: 52,                      // Max tickets per holder
-    DRAW_INTERVAL_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
-    ACTIVITY_WINDOW_DAYS: 7,              // Days of activity required for full eligibility
-    BASE_PRIZE: 100000,                   // Base ASDF prize amount (legacy - now uses pool)
-    PRIZE_PER_TICKET: 10000,              // Additional ASDF per ticket in pool (legacy)
-    SUPPLY_CACHE_MS: 5 * 60 * 1000,       // Cache supply for 5 minutes
-    PRIZE_POOL_THRESHOLD: 1_000_000,      // 1M ASDF threshold to trigger lottery
-    ASDF_TO_POOL_PERCENT: 0.552           // 55.2% of collected ASDF goes to lottery pool
-};
+// --- LOTTERY & REFERRAL CONFIG (from config.js) ---
+const LOTTERY_CONFIG = config.LOTTERY_CONFIG;
+const REFERRAL_CONFIG = config.REFERRAL_CONFIG;
 
-// --- REFERRAL CONFIG (552 SYMMETRY - Gambler-Holder Alignment) ---
-const REFERRAL_CONFIG = {
-    USER_REBATE_PERCENT: 0.00552,         // 0.552% of bet → Filleul
-    REFERRER_REWARD_PERCENT: 0.00448,     // 0.448% of bet → Parrain
-    MIN_ASDF_TO_REFER: 55200,             // Min ASDF to create referral code
-    CODE_LENGTH: 8,
-    MAX_REFERRALS_PER_USER: 100,
-    REWARD_CURRENCY: 'ASDF',
-    CLAIM_RATIO: 1.0
-};
-const PRIORITY_FEE_UNITS = 50000; 
-
-// --- EXTERNAL TRACKER CONFIG ---
-const TOKEN_TOTAL_SUPPLY = 1_000_000_000;
-const TRACKED_WALLET = "vcGYZbvDid6cRUkCCqcWpBxow73TLpmY6ipmDUtrTF8"; // CTO Wallet
-const PURCHASE_SOURCE_ADDRESS = "DuhRX5JTPtsWU5n44t8tcFEfmzy2Eu27p4y6z8Rhf2bb";
-const HELIUS_RPC_URL = SOLANA_NETWORK; // Re-use existing
-const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
-const JUP_PRICE_URL = "https://lite-api.jup.ag/price/v3";
+// --- EXTERNAL TRACKER CONFIG (from config.js) ---
+const TOKEN_TOTAL_SUPPLY = config.TOKEN_TOTAL_SUPPLY;
+const TRACKED_WALLET = config.TRACKED_WALLET;
+const PURCHASE_SOURCE_ADDRESS = config.PURCHASE_SOURCE_ADDRESS;
+const HELIUS_RPC_URL = SOLANA_NETWORK;
+const HELIUS_ENHANCED_BASE = config.HELIUS_ENHANCED_BASE;
+const JUP_PRICE_URL = config.JUP_PRICE_URL;
 const JUPITER_API_KEY = process.env.JUPITER_API_KEY || "";
 
 // --- LOGGING ---
 const serverLogs = [];
-const MAX_LOGS = 100;
+const MAX_LOGS = config.MAX_LOGS;
 function log(message, type = "INFO") {
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] [${type}] ${message}`;
@@ -112,19 +86,45 @@ const SIGNATURE_REGEX = /^[1-9A-HJ-NP-Za-km-z]{80,100}$/;
 function isValidSolanaAddress(address) { return typeof address === 'string' && SOLANA_ADDRESS_REGEX.test(address); }
 function isValidSignature(signature) { return typeof signature === 'string' && SIGNATURE_REGEX.test(signature); }
 
-// --- RATE LIMIT ---
-const betLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 10, message: { error: "RATE_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
-const stateLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 120, message: { error: "POLLING_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
-const voteLimiter = rateLimit({ 
-    windowMs: 3600 * 1000, // 1 hour
-    max: 1, 
-    message: { error: "IP_COOLDOWN_ACTIVE" }, 
-    standardHeaders: true, 
-    legacyHeaders: false 
+// --- RATE LIMIT (from config.js) ---
+const betLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.BET.windowMs,
+    max: config.RATE_LIMITS.BET.max,
+    message: { error: "RATE_LIMIT_EXCEEDED" },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+const stateLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.STATE.windowMs,
+    max: config.RATE_LIMITS.STATE.max,
+    message: { error: "POLLING_LIMIT_EXCEEDED" },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+const voteLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.VOTE.windowMs,
+    max: config.RATE_LIMITS.VOTE.max,
+    message: { error: "IP_COOLDOWN_ACTIVE" },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+const claimLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.CLAIM.windowMs,
+    max: config.RATE_LIMITS.CLAIM.max,
+    message: { error: "CLAIM_RATE_LIMIT" },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+const registerLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.REGISTER.windowMs,
+    max: config.RATE_LIMITS.REGISTER.max,
+    message: { error: "REGISTER_RATE_LIMIT" },
+    standardHeaders: true,
+    legacyHeaders: false
 });
 
 // --- PERSISTENCE ---
-const RENDER_DISK_PATH = '/var/data';
+const RENDER_DISK_PATH = config.RENDER_DISK_PATH;
 const DATA_DIR = fsSync.existsSync(RENDER_DISK_PATH) ? RENDER_DISK_PATH : path.join(__dirname, 'data');
 const FRAMES_DIR = path.join(DATA_DIR, 'frames');
 const USERS_DIR = path.join(DATA_DIR, 'users');
@@ -2061,6 +2061,138 @@ function updatePublicStateCache() {
 setInterval(updatePublicStateCache, 500);
 
 // --- ENDPOINTS ---
+
+// Health check endpoint for monitoring
+app.get('/api/health', async (req, res) => {
+    const health = {
+        status: 'ok',
+        timestamp: Date.now(),
+        version: BACKEND_VERSION,
+        uptime: Math.floor(process.uptime()),
+        services: {
+            rpc: { status: 'unknown', latency: null },
+            pumpswap: { status: 'unknown', price: null },
+            pyth: { status: 'unknown', price: null }
+        },
+        memory: {
+            heapUsed: Math.floor(process.memoryUsage().heapUsed / 1024 / 1024),
+            heapTotal: Math.floor(process.memoryUsage().heapTotal / 1024 / 1024),
+            rss: Math.floor(process.memoryUsage().rss / 1024 / 1024)
+        },
+        gameState: {
+            isInitialized,
+            isPaused: gameState?.isPaused || false,
+            currentFrame: gameState?.candleStartTime || null,
+            payoutQueueLength: currentQueueLength || 0
+        }
+    };
+
+    // Test RPC connection
+    try {
+        const start = Date.now();
+        const conn = new Connection(SOLANA_NETWORK);
+        await conn.getSlot();
+        health.services.rpc = { status: 'ok', latency: Date.now() - start };
+    } catch (e) {
+        health.services.rpc = { status: 'error', error: e.message };
+        health.status = 'degraded';
+    }
+
+    // Test PumpSwap price
+    try {
+        const priceData = await getASDF_PriceFromPool();
+        health.services.pumpswap = {
+            status: priceData.priceInSol > 0 ? 'ok' : 'stale',
+            price: priceData.priceInSol,
+            reserves: { asdf: priceData.baseReserve, sol: priceData.quoteReserve }
+        };
+    } catch (e) {
+        health.services.pumpswap = { status: 'error', error: e.message };
+        health.status = 'degraded';
+    }
+
+    // Pyth oracle status
+    health.services.pyth = {
+        status: gameState?.price > 0 ? 'ok' : 'stale',
+        price: gameState?.price || 0
+    };
+
+    const statusCode = health.status === 'ok' ? 200 : 503;
+    res.status(statusCode).json(health);
+});
+
+// Prometheus-compatible metrics endpoint
+app.get('/api/metrics', (req, res) => {
+    const metrics = [
+        '# HELP asdforecast_uptime_seconds Server uptime in seconds',
+        '# TYPE asdforecast_uptime_seconds gauge',
+        `asdforecast_uptime_seconds ${Math.floor(process.uptime())}`,
+
+        '# HELP asdforecast_total_volume_sol Total betting volume in SOL',
+        '# TYPE asdforecast_total_volume_sol counter',
+        `asdforecast_total_volume_sol ${globalStats?.totalVolume || 0}`,
+
+        '# HELP asdforecast_total_fees_sol Total fees collected in SOL',
+        '# TYPE asdforecast_total_fees_sol counter',
+        `asdforecast_total_fees_sol ${globalStats?.totalFees || 0}`,
+
+        '# HELP asdforecast_total_asdf_collected Total ASDF collected',
+        '# TYPE asdforecast_total_asdf_collected counter',
+        `asdforecast_total_asdf_collected ${globalStats?.totalASDF || 0}`,
+
+        '# HELP asdforecast_active_users Total registered users',
+        '# TYPE asdforecast_active_users gauge',
+        `asdforecast_active_users ${knownUsers?.size || 0}`,
+
+        '# HELP asdforecast_payout_queue_length Pending payouts in queue',
+        '# TYPE asdforecast_payout_queue_length gauge',
+        `asdforecast_payout_queue_length ${currentQueueLength || 0}`,
+
+        '# HELP asdforecast_sol_price Current SOL price in USD',
+        '# TYPE asdforecast_sol_price gauge',
+        `asdforecast_sol_price ${gameState?.price || 0}`,
+
+        '# HELP asdforecast_asdf_price_sol Current ASDF price in SOL',
+        '# TYPE asdforecast_asdf_price_sol gauge',
+        `asdforecast_asdf_price_sol ${cachedASDF_Price?.priceInSol || 0}`,
+
+        '# HELP asdforecast_lottery_pool Current lottery prize pool in ASDF',
+        '# TYPE asdforecast_lottery_pool gauge',
+        `asdforecast_lottery_pool ${lotteryState?.dynamicPrizePool || 0}`,
+
+        '# HELP asdforecast_lottery_round Current lottery round number',
+        '# TYPE asdforecast_lottery_round gauge',
+        `asdforecast_lottery_round ${lotteryState?.currentRound || 0}`,
+
+        '# HELP asdforecast_referrers_total Total number of referrers',
+        '# TYPE asdforecast_referrers_total gauge',
+        `asdforecast_referrers_total ${Object.keys(referralData?.links || {}).length}`,
+
+        '# HELP asdforecast_referred_users_total Total referred users',
+        '# TYPE asdforecast_referred_users_total gauge',
+        `asdforecast_referred_users_total ${Object.keys(referralData?.userToReferrer || {}).length}`,
+
+        '# HELP asdforecast_memory_heap_bytes Memory heap usage in bytes',
+        '# TYPE asdforecast_memory_heap_bytes gauge',
+        `asdforecast_memory_heap_bytes ${process.memoryUsage().heapUsed}`,
+
+        '# HELP asdforecast_memory_rss_bytes Memory RSS in bytes',
+        '# TYPE asdforecast_memory_rss_bytes gauge',
+        `asdforecast_memory_rss_bytes ${process.memoryUsage().rss}`,
+
+        '# HELP asdforecast_is_initialized Server initialization status',
+        '# TYPE asdforecast_is_initialized gauge',
+        `asdforecast_is_initialized ${isInitialized ? 1 : 0}`,
+
+        '# HELP asdforecast_is_paused Game paused status',
+        '# TYPE asdforecast_is_paused gauge',
+        `asdforecast_is_paused ${gameState?.isPaused ? 1 : 0}`
+    ];
+
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(metrics.join('\n') + '\n');
+});
+
 app.get('/api/state', stateLimiter, async (req, res) => {
     if (!isInitialized || !cachedPublicState) return res.status(503).json({ error: "SERVICE_UNAVAILABLE", reason: "Backend cache initializing." });
     const response = { ...cachedPublicState };
@@ -2413,7 +2545,7 @@ app.get('/api/referral/code', stateLimiter, async (req, res) => {
 });
 
 // Register with a referral code
-app.post('/api/referral/register', stateLimiter, async (req, res) => {
+app.post('/api/referral/register', registerLimiter, async (req, res) => {
     const { user, code } = req.body;
 
     if (!user || !isValidSolanaAddress(user)) {
@@ -2522,7 +2654,7 @@ app.get('/api/referral/stats', stateLimiter, async (req, res) => {
 });
 
 // Claim referral rewards (552 SYMMETRY - Proportional to ASDF holding)
-app.post('/api/referral/claim', stateLimiter, async (req, res) => {
+app.post('/api/referral/claim', claimLimiter, async (req, res) => {
     const { user } = req.body;
 
     if (!user || !isValidSolanaAddress(user)) {

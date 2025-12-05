@@ -1,5 +1,99 @@
 # ASDForecast Changelog
 
+## Version 148.0 - Infrastructure Hardening & Monitoring
+
+### Overview
+
+This update improves infrastructure reliability, security, and observability with centralized configuration, enhanced rate limiting, and monitoring endpoints.
+
+---
+
+## Changes
+
+### 1. Centralized Configuration
+
+**New file: `config.js`**
+
+All hardcoded constants extracted to a single configuration file:
+- Solana addresses (ASDF_MINT, wallets, pool accounts)
+- Game economy parameters (fees, payouts, frame duration)
+- Lottery and Referral configs
+- Rate limiting settings
+- External API URLs
+
+```javascript
+const config = require('./config');
+const ASDF_MINT = config.ASDF_MINT;
+```
+
+### 2. Enhanced Rate Limiting
+
+**New limiters for sensitive endpoints:**
+
+| Endpoint | Old Limiter | New Limiter |
+|----------|-------------|-------------|
+| `/api/referral/claim` | stateLimiter (120/min) | claimLimiter (3/5min) |
+| `/api/referral/register` | stateLimiter (120/min) | registerLimiter (5/min) |
+
+### 3. Health Check Endpoint
+
+**GET `/api/health`**
+
+Returns comprehensive service status:
+```json
+{
+  "status": "ok",
+  "version": "148.0",
+  "uptime": 3600,
+  "services": {
+    "rpc": { "status": "ok", "latency": 45 },
+    "pumpswap": { "status": "ok", "price": 0.000000871 },
+    "pyth": { "status": "ok", "price": 135.52 }
+  },
+  "memory": { "heapUsed": 85, "rss": 120 },
+  "gameState": { "isInitialized": true, "isPaused": false }
+}
+```
+
+### 4. Prometheus Metrics Endpoint
+
+**GET `/api/metrics`**
+
+Prometheus-compatible metrics:
+- `asdforecast_uptime_seconds`
+- `asdforecast_total_volume_sol`
+- `asdforecast_total_fees_sol`
+- `asdforecast_active_users`
+- `asdforecast_payout_queue_length`
+- `asdforecast_sol_price`
+- `asdforecast_asdf_price_sol`
+- `asdforecast_lottery_pool`
+- `asdforecast_memory_heap_bytes`
+- And more...
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `config.js` | **NEW** - Centralized configuration |
+| `server.js` | Import config, new rate limiters, health/metrics endpoints |
+| `package.json` | Version 1.48.0 |
+| `README.md` | Security section, monitoring docs |
+
+---
+
+## Security Improvements
+
+- Stricter rate limiting on claim/register endpoints
+- Documented frontend Helius key restriction requirements
+- Rate limit configuration externalized for easy adjustment
+
+---
+
+---
+
 ## Version 147.0 - On-chain ASDF Price (PumpSwap Pool)
 
 ### Overview
