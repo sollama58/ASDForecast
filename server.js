@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ override: true });
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -37,6 +37,23 @@ const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
 
 const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
+
+// --- PUMPSWAP POOL CONFIG (On-chain price source) ---
+const PUMPSWAP_POOL = {
+    POOL_ADDRESS: "DuhRX5JTPtsWU5n44t8tcFEfmzy2Eu27p4y6z8Rhf2bb",
+    BASE_TOKEN_ACCOUNT: "9NXgzYh3ZhrqiLn994fhkGx7ikAUbEcWux9SGuxyXq2z",   // ASDF reserve
+    QUOTE_TOKEN_ACCOUNT: "HmmH9j2BHmJHQDRGMswBMccMfsr6jknGTux3wFqmXrya",  // SOL reserve
+    BASE_DECIMALS: 6,
+    QUOTE_DECIMALS: 9
+};
+
+// --- STARTUP VALIDATION ---
+if (!process.env.HELIUS_API_KEY) {
+    console.error("❌ FATAL: HELIUS_API_KEY not found in environment");
+    process.exit(1);
+}
+console.log(`✓ HELIUS_API_KEY loaded (${process.env.HELIUS_API_KEY.slice(0,8)}...)`);
+
 const PRICE_SCALE = 0.1;
 const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552;
@@ -272,6 +289,18 @@ async function loadAndInit() {
     
     // START EXTERNAL TRACKER LOOPS
     startExternalTrackerService();
+
+    // Validate PumpSwap pool is accessible
+    try {
+        const testPrice = await getASDF_PriceFromPool();
+        if (testPrice.priceInSol > 0) {
+            log(`✓ PumpSwap pool validated: ${testPrice.priceInSol.toFixed(12)} SOL/ASDF`, "SYS");
+        } else {
+            log("⚠ PumpSwap pool returned zero price - check pool addresses", "WARN");
+        }
+    } catch (e) {
+        log(`⚠ PumpSwap pool validation failed: ${e.message}`, "ERR");
+    }
 
     isInitialized = true; 
     updatePublicStateCache(); 
@@ -541,36 +570,64 @@ async function registerReferral(newUserPubKey, referralCode) {
     return { success: true, referrer: referrerPubKey };
 }
 
-// --- ASDF PRICE FETCHING (Jupiter API) ---
-let cachedASDF_Price = { price: 0, timestamp: 0 };
-const ASDF_PRICE_CACHE_MS = 60 * 1000; // Cache price for 1 minute
+// --- ASDF PRICE FETCHING (On-chain PumpSwap Pool) ---
+let cachedASDF_Price = { priceInSol: 0, priceInUsd: 0, timestamp: 0 };
+const ASDF_PRICE_CACHE_MS = 30 * 1000; // Cache price for 30 seconds (on-chain is fast)
 
-async function getASDF_Price() {
+async function getASDF_PriceFromPool() {
     const now = Date.now();
     // Return cached price if still valid
-    if (cachedASDF_Price.price > 0 && (now - cachedASDF_Price.timestamp) < ASDF_PRICE_CACHE_MS) {
-        return cachedASDF_Price.price;
+    if (cachedASDF_Price.priceInSol > 0 && (now - cachedASDF_Price.timestamp) < ASDF_PRICE_CACHE_MS) {
+        return cachedASDF_Price;
     }
 
     try {
-        // Jupiter Price API v4
-        const response = await axios.get(
-            `https://price.jup.ag/v4/price?ids=${ASDF_MINT}`,
-            { timeout: 5000 }
-        );
+        const connection = new Connection(SOLANA_NETWORK);
 
-        if (response.data?.data?.[ASDF_MINT]?.price) {
-            const price = response.data.data[ASDF_MINT].price;
-            cachedASDF_Price = { price, timestamp: now };
-            console.log(`> [REFERRAL] ASDF price updated: $${price}`);
-            return price;
+        // Fetch both token account balances in parallel
+        const [baseBalanceRes, quoteBalanceRes] = await Promise.all([
+            connection.getTokenAccountBalance(new PublicKey(PUMPSWAP_POOL.BASE_TOKEN_ACCOUNT)),
+            connection.getTokenAccountBalance(new PublicKey(PUMPSWAP_POOL.QUOTE_TOKEN_ACCOUNT))
+        ]);
+
+        const baseReserve = parseFloat(baseBalanceRes.value.uiAmountString || "0"); // ASDF
+        const quoteReserve = parseFloat(quoteBalanceRes.value.uiAmountString || "0"); // SOL
+
+        if (baseReserve > 0 && quoteReserve > 0) {
+            const priceInSol = quoteReserve / baseReserve;
+            // Convert to USD using current SOL price (with immediate CoinGecko fallback)
+            let solPriceUsd = gameState.price || externalStatsCache.wallet.solPriceUsd || 0;
+            if (solPriceUsd === 0) {
+                try {
+                    const res = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&x_cg_demo_api_key=${COINGECKO_API_KEY}`, { timeout: 3000 });
+                    solPriceUsd = res.data?.solana?.usd || 0;
+                } catch (e) { /* ignore, USD will be 0 */ }
+            }
+            const priceInUsd = priceInSol * solPriceUsd;
+
+            cachedASDF_Price = {
+                priceInSol,
+                priceInUsd,
+                baseReserve,
+                quoteReserve,
+                timestamp: now
+            };
+
+            console.log(`> [PRICE] ASDF on-chain: ${priceInSol.toFixed(12)} SOL ($${priceInUsd.toFixed(8)}) | Pool: ${baseReserve.toLocaleString()} ASDF / ${quoteReserve.toFixed(4)} SOL`);
+            return cachedASDF_Price;
         }
     } catch (e) {
-        console.error(`> [REFERRAL] Price fetch error: ${e.message}`);
+        console.error(`> [PRICE] On-chain fetch error: ${e.message}`);
     }
 
     // Fallback to cached or default
-    return cachedASDF_Price.price || 0.00001; // Default ~$0.00001 if no data
+    return cachedASDF_Price.priceInSol > 0 ? cachedASDF_Price : { priceInSol: 0.000001, priceInUsd: 0, timestamp: now };
+}
+
+// Wrapper for backward compatibility - returns price in SOL
+async function getASDF_Price() {
+    const priceData = await getASDF_PriceFromPool();
+    return priceData.priceInSol;
 }
 
 // Calculate and accumulate referral rewards based on BET AMOUNT (not fees)
@@ -1371,11 +1428,16 @@ async function fetchAndCacheExternalData() {
 async function fetchTokenPricesStaggered() {
     if(cacheCycleCount % 10 !== 0) return; // Run every 10th cycle (10 mins)
     log("[TRACKER] Updating Token Prices...", "SYS");
-    
-    // ASDF Price
-    const asdfPrice = await fetchJupiterTokenPrice(ASDF_MINT);
-    externalStatsCache.wallet.tokenPriceUsd = asdfPrice;
-    
+
+    // ASDF Price (from on-chain PumpSwap pool)
+    const priceData = await getASDF_PriceFromPool();
+    externalStatsCache.wallet.tokenPriceUsd = priceData.priceInUsd;
+    externalStatsCache.wallet.tokenPriceInSol = priceData.priceInSol;
+    externalStatsCache.wallet.poolReserves = {
+        asdf: priceData.baseReserve || 0,
+        sol: priceData.quoteReserve || 0
+    };
+
     // SOL Price (Reuse existing game state price if available, else fetch)
     if(gameState.price > 0) {
         externalStatsCache.wallet.solPriceUsd = gameState.price;
@@ -2406,6 +2468,7 @@ app.get('/api/referral/stats', stateLimiter, async (req, res) => {
 
         // Get ASDF price and user balance for claimable calculation
         const asdfPrice = await getASDF_Price();
+        const priceAvailable = asdfPrice > 0;
         const userASDF_Balance = await getUserASDFBalance(userKey);
 
         // Calculate pending rewards in SOL and ASDF
@@ -2447,7 +2510,10 @@ app.get('/api/referral/stats', stateLimiter, async (req, res) => {
             userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552%
             referrerRewardPercent: REFERRAL_CONFIG.REFERRER_REWARD_PERCENT * 100, // 0.448%
             minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
-            rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
+            rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY,
+            // Price status
+            priceAvailable: priceAvailable,
+            priceWarning: priceAvailable ? null : "Price temporarily unavailable - rewards displayed may be inaccurate"
         });
     } catch (e) {
         console.error(`> [REFERRAL] Stats error for ${userKey}:`, e.message);
