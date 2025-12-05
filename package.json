@@ -1,6 +1,6 @@
 {
   "name": "asdforecast-backend",
-  "version": "1.48.0",
+  "version": "1.49.0",
   "description": "Backend for ASDForecast Solana App",
   "main": "server.js",
   "scripts": {
@@ -14,7 +14,8 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.18.2",
-    "express-rate-limit": "^7.1.5"
+    "express-rate-limit": "^7.1.5",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

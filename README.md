@@ -11,6 +11,7 @@ Prediction market platform on Solana for SOL price movements with ASDF token lot
 - **On-chain ASDF price** - Direct price calculation from PumpSwap pool reserves
 - **Sentiment voting** - Daily community sentiment polls
 - **Real-time updates** - Live price feeds via Pyth Oracle
+- **WebSocket streaming** - Sub-second UI updates with automatic fallback to polling
 
 ## Quick Start
 
@@ -112,7 +113,7 @@ python3 -m http.server 8080
 
 ## Version
 
-- **Backend**: v148.0
+- **Backend**: v149.0
 - **Frontend**: v122.0
 
 ## Security

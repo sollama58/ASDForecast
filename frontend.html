@@ -553,6 +553,11 @@
     let pollTimeout = null; // Store market data timeout ID for cleanup
     let balanceIntervalId = null; // NEW: Store balance interval ID
 
+    // WebSocket for real-time updates
+    let ws = null;
+    let wsReconnectAttempts = 0;
+    const WS_RECONNECT_MAX_DELAY = 30000; // 30s max backoff
+
     window.addEventListener('load', () => {
         if (window.solanaWeb3) {
             PublicKey = solanaWeb3.PublicKey;
@@ -698,7 +703,9 @@
         });
 
         // Start polling initially
-        poll(); 
+        poll();
+        // Initialize WebSocket for real-time updates
+        initWebSocket();
         setInterval(updateTimer, 1000);
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
     });
@@ -852,6 +859,10 @@
         poll();
         startLotteryEligibilityPolling();
         startReferralPolling();
+        // Authenticate WebSocket with new pubKey
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'AUTH', pubKey: resp.publicKey.toString() }));
+        }
     }
     async function refreshBalance() {
         if(state.pubKey) {
@@ -1594,11 +1605,204 @@
             if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; }
             updateCosts(); // Still need to run this to handle disabling if offline
         } finally {
-            // Recursive polling with Jitter (0-400ms)
+            // Recursive polling with Jitter
+            // If WebSocket is connected, poll less frequently (fallback only)
+            const baseInterval = (ws && ws.readyState === WebSocket.OPEN) ? 10000 : 2000;
             const jitter = Math.floor(Math.random() * 400);
-            pollTimeout = setTimeout(poll, 2000 + jitter);
+            pollTimeout = setTimeout(poll, baseInterval + jitter);
         }
     }
+
+    // ==================== WEBSOCKET CLIENT ====================
+    function initWebSocket() {
+        // Determine WebSocket URL from API_URL
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsHost = API_URL.includes('localhost')
+            ? 'localhost:3000'
+            : 'asdforecast.onrender.com';
+        const wsUrl = `${wsProtocol}//${wsHost}`;
+
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch (e) {
+            console.error('[WS] Failed to create WebSocket:', e);
+            return;
+        }
+
+        ws.onopen = () => {
+            console.log('[WS] Connected');
+            wsReconnectAttempts = 0;
+
+            // Authenticate with pubKey if connected
+            if (state.pubKey) {
+                ws.send(JSON.stringify({ type: 'AUTH', pubKey: state.pubKey.toString() }));
+            }
+
+            // Update status indicator
+            if (ui.statusText) {
+                ui.statusText.innerText = "LIVE";
+                ui.statusText.className = "text-green-400";
+            }
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                handleWebSocketMessage(msg);
+            } catch (e) {
+                console.error('[WS] Message parse error:', e);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('[WS] Disconnected');
+            ws = null;
+
+            // Reconnect with exponential backoff
+            const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts++), WS_RECONNECT_MAX_DELAY);
+            console.log(`[WS] Reconnecting in ${delay}ms...`);
+            setTimeout(initWebSocket, delay);
+        };
+
+        ws.onerror = (e) => {
+            console.error('[WS] Error:', e);
+        };
+    }
+
+    function handleWebSocketMessage(msg) {
+        const { event, data, ts } = msg;
+
+        switch (event) {
+            case 'STATE':
+                processStateUpdate(data);
+                break;
+            case 'PRICE':
+                // Quick price update (lighter than full state)
+                if (ui.price && data.price) {
+                    ui.price.innerText = data.price.toFixed(2);
+                    if (ui.change && data.change !== undefined) {
+                        const changeClass = data.change >= 0 ? 'text-green-400' : 'text-red-400';
+                        ui.change.innerText = `${data.change >= 0 ? '+' : ''}${data.change.toFixed(4)}%`;
+                        ui.change.className = changeClass;
+                    }
+                }
+                break;
+            case 'FRAME_CLOSE':
+                // Frame result notification
+                console.log('[WS] Frame closed:', data.result, 'Winners:', data.winners);
+                // The STATE update will follow with full data
+                break;
+            default:
+                console.log('[WS] Unknown event:', event);
+        }
+    }
+
+    function processStateUpdate(data) {
+        // Same logic as poll() but from WebSocket
+        if (!ui || !ui.price) return;
+
+        state.isOnline = true;
+        if (ui.statusText) {
+            ui.statusText.innerText = "LIVE";
+            ui.statusText.className = "text-green-400";
+        }
+        if (ui.topStatus) {
+            ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-green-900/50 transition-colors duration-500";
+        }
+        if (ui.lastUpdated && data.lastPriceTimestamp) {
+            ui.lastUpdated.innerText = `Price Data: ${new Date(data.lastPriceTimestamp).toLocaleTimeString()}`;
+        }
+        if (data.backendVersion) {
+            ui.backendVersion.innerText = `v${data.backendVersion}`;
+        }
+
+        // --- STATE SYNC (same as poll) ---
+        state.isResetting = data.isResetting;
+        state.isCancelled = data.isCancelled;
+
+        if (data.isResetting) {
+            ui.netSharesHeader.innerText = "CALCULATING RESULTS...";
+            ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse");
+            ui.netSharesHeader.classList.remove("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "RESETTING";
+            ui.statusText.className = "text-blue-400";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "CALCULATING RESULTS...";
+                ui.pauseText.className = "text-blue-400 font-bold text-xl";
+            }
+            ui.timer.innerText = "Resetting...";
+        } else if (data.isCancelled) {
+            ui.netSharesHeader.innerText = "FRAME CANCELLED";
+            ui.netSharesHeader.classList.add("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "CANCELLED";
+            ui.statusText.className = "text-red-500";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "FRAME CANCELLED - funds refunded";
+                ui.pauseText.className = "text-red-500 font-bold text-xl";
+            }
+        } else if (data.isPaused) {
+            ui.netSharesHeader.innerText = "MARKET PAUSED";
+            ui.netSharesHeader.classList.add("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "PAUSED";
+            ui.statusText.className = "text-yellow-500";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "MARKET PAUSED";
+                ui.pauseText.className = "text-yellow-500 font-bold text-xl";
+            }
+        } else {
+            ui.netSharesHeader.innerText = "MARKET LIVE";
+            ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse");
+            ui.pauseOverlay.classList.add('hidden');
+        }
+
+        // Update prices
+        if (data.price) ui.price.innerText = data.price.toFixed(2);
+        if (data.change !== undefined) {
+            const changeClass = data.change >= 0 ? 'text-green-400' : 'text-red-400';
+            ui.change.innerText = `${data.change >= 0 ? '+' : ''}${data.change.toFixed(4)}%`;
+            ui.change.className = changeClass;
+        }
+
+        // Update market data
+        if (data.market) {
+            state.prices.up = data.market.priceUp;
+            state.prices.down = data.market.priceDown;
+            updateCosts();
+
+            const totalShares = data.market.sharesUp + data.market.sharesDown;
+            const pctUp = Math.round((data.market.sharesUp / totalShares) * 100);
+            const pctDown = 100 - pctUp;
+
+            if (ui.barUp) ui.barUp.style.width = `${pctUp}%`;
+            if (ui.barDown) ui.barDown.style.width = `${pctDown}%`;
+            if (ui.lblSharesUp) ui.lblSharesUp.innerText = Math.floor(data.market.sharesUp);
+            if (ui.lblSharesDown) ui.lblSharesDown.innerText = Math.floor(data.market.sharesDown);
+            if (ui.lblPriceUp) ui.lblPriceUp.innerText = state.prices.up.toFixed(4);
+            if (ui.lblPriceDown) ui.lblPriceDown.innerText = state.prices.down.toFixed(4);
+        }
+
+        // Update frame times
+        if (data.candleStartTime && data.candleEndTime) {
+            state.targetEndTime = data.candleEndTime;
+            if (ui.frameStart) ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString();
+            if (ui.frameEnd) ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString();
+        }
+
+        // Update history if available
+        if (data.history && Array.isArray(data.history)) {
+            state.fullHistory = data.history;
+            renderHistoryTable(data.history);
+        }
+
+        // Update lottery if available
+        if (data.lottery && ui.lotteryPool) {
+            ui.lotteryPool.innerText = (data.lottery.prizePool || 0).toLocaleString();
+        }
+    }
+    // ==================== END WEBSOCKET CLIENT ====================
 
     async function buy(dir) {
 

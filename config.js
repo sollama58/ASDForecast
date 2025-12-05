@@ -9,7 +9,7 @@ module.exports = {
     // ===================
     // VERSION
     // ===================
-    BACKEND_VERSION: "148.0",
+    BACKEND_VERSION: "149.0",
 
     // ===================
     // SOLANA ADDRESSES
@@ -91,6 +91,15 @@ module.exports = {
         VOTE: { windowMs: 3600 * 1000, max: 1 },         // 1 vote/hour
         CLAIM: { windowMs: 5 * 60 * 1000, max: 3 },      // 3 claims/5min
         REGISTER: { windowMs: 60 * 1000, max: 5 }        // 5 registers/min
+    },
+
+    // ===================
+    // WEBSOCKET
+    // ===================
+    WEBSOCKET: {
+        HEARTBEAT_INTERVAL: 30000,      // 30s ping/pong
+        STATE_BROADCAST_THROTTLE: 500,  // 500ms min between state broadcasts
+        RECONNECT_BACKOFF_MAX: 30000    // 30s max reconnect delay
     },
 
     // ===================

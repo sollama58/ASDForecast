@@ -1,5 +1,7 @@
 require('dotenv').config({ override: true });
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const cors = require('cors');
 const crypto = require('crypto');
 const config = require('./config');
@@ -13,9 +15,96 @@ const { Mutex } = require('async-mutex');
 const rateLimit = require('express-rate-limit'); 
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
 const stateMutex = new Mutex();
 const payoutMutex = new Mutex();
 const lotteryMutex = new Mutex();
+
+// --- WEBSOCKET CLIENT TRACKING ---
+const wsClients = new Map(); // ws -> { pubKey, connectedAt, lastPong }
+let wsClientCount = 0;
+
+wss.on('connection', (ws, req) => {
+    const clientId = ++wsClientCount;
+    wsClients.set(ws, {
+        id: clientId,
+        pubKey: null,
+        connectedAt: Date.now(),
+        lastPong: Date.now()
+    });
+    console.log(`> [WS] Client ${clientId} connected (total: ${wsClients.size})`);
+
+    // Handle client messages
+    ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'AUTH' && msg.pubKey) {
+                const client = wsClients.get(ws);
+                if (client) {
+                    client.pubKey = msg.pubKey;
+                    console.log(`> [WS] Client ${client.id} authenticated: ${msg.pubKey.slice(0,8)}...`);
+                }
+            } else if (msg.type === 'PING') {
+                ws.send(JSON.stringify({ event: 'PONG', ts: Date.now() }));
+            }
+        } catch (e) { /* ignore invalid messages */ }
+    });
+
+    ws.on('pong', () => {
+        const client = wsClients.get(ws);
+        if (client) client.lastPong = Date.now();
+    });
+
+    ws.on('close', () => {
+        const client = wsClients.get(ws);
+        if (client) {
+            console.log(`> [WS] Client ${client.id} disconnected (total: ${wsClients.size - 1})`);
+        }
+        wsClients.delete(ws);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`> [WS] Client error:`, err.message);
+    });
+
+    // Send initial state
+    if (typeof cachedPublicState !== 'undefined' && cachedPublicState) {
+        ws.send(JSON.stringify({ event: 'STATE', data: cachedPublicState, ts: Date.now() }));
+    }
+});
+
+// Heartbeat interval - ping clients every 30s, close if no pong in 60s
+setInterval(() => {
+    const now = Date.now();
+    for (const [ws, client] of wsClients) {
+        if (now - client.lastPong > 60000) {
+            console.log(`> [WS] Client ${client.id} timed out, closing`);
+            ws.terminate();
+        } else if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+        }
+    }
+}, config.WEBSOCKET.HEARTBEAT_INTERVAL);
+
+// Broadcast function - sends to all connected clients
+function wsBroadcast(event, data, filterFn = null) {
+    if (wsClients.size === 0) return;
+    const message = JSON.stringify({ event, data, ts: Date.now() });
+    for (const [ws, client] of wsClients) {
+        if (ws.readyState === WebSocket.OPEN) {
+            if (!filterFn || filterFn(client)) {
+                ws.send(message);
+            }
+        }
+    }
+}
+
+// Broadcast to specific user by pubKey
+function wsBroadcastToUser(pubKey, event, data) {
+    wsBroadcast(event, data, (client) => client.pubKey === pubKey);
+}
 
 app.set('trust proxy', 1);
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
@@ -1802,6 +1891,17 @@ async function closeFrame(closePrice, closeTime) {
         if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
 
+        // WebSocket: Broadcast frame close event to all clients
+        wsBroadcast('FRAME_CLOSE', {
+            frameId: frameId,
+            result: result,
+            open: openPrice,
+            close: closePrice,
+            winners: winnerCount,
+            totalPayout: payoutTotal,
+            totalSol: frameSol
+        });
+
         // RECALCULATE TOTALS FROM HISTORY TO ENSURE SYNC
         recalculateStatsFromHistory();
 
@@ -1881,6 +1981,16 @@ async function updatePrice() {
         await stateMutex.runExclusive(async () => {
             gameState.price = fetchedPrice;
             gameState.lastPriceTimestamp = Date.now();
+
+            // WebSocket: Broadcast price update
+            const priceChange = gameState.price - gameState.candleOpen;
+            const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
+            wsBroadcast('PRICE', {
+                price: fetchedPrice,
+                change: percentChange,
+                timestamp: gameState.lastPriceTimestamp
+            });
+
             const currentWindowStart = getCurrentWindowStart();
 
             if (Date.now() >= gameState.hourlySentiment.nextReset) {
@@ -2056,6 +2166,9 @@ function updatePublicStateCache() {
             rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
         }
     };
+
+    // WebSocket: Broadcast state to all connected clients
+    wsBroadcast('STATE', cachedPublicState);
 }
 
 setInterval(updatePublicStateCache, 500);
@@ -2084,6 +2197,9 @@ app.get('/api/health', async (req, res) => {
             isPaused: gameState?.isPaused || false,
             currentFrame: gameState?.candleStartTime || null,
             payoutQueueLength: currentQueueLength || 0
+        },
+        websocket: {
+            connectedClients: wsClients?.size || 0
         }
     };
 
@@ -2186,7 +2302,11 @@ app.get('/api/metrics', (req, res) => {
 
         '# HELP asdforecast_is_paused Game paused status',
         '# TYPE asdforecast_is_paused gauge',
-        `asdforecast_is_paused ${gameState?.isPaused ? 1 : 0}`
+        `asdforecast_is_paused ${gameState?.isPaused ? 1 : 0}`,
+
+        '# HELP asdforecast_websocket_clients Connected WebSocket clients',
+        '# TYPE asdforecast_websocket_clients gauge',
+        `asdforecast_websocket_clients ${wsClients?.size || 0}`
     ];
 
     res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
@@ -2793,7 +2913,8 @@ setInterval(checkLotterySchedule, 60 * 60 * 1000);
 // Also check on startup after a short delay
 setTimeout(checkLotterySchedule, 10000);
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`, "SYS");
+    log(`> WebSocket server ready on ws://localhost:${PORT}`, "SYS");
     loadAndInit();
 });
