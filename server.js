@@ -32,7 +32,7 @@ const PAYOUT_MULTIPLIER = 0.94;
 const FEE_PERCENT = 0.0552; 
 const UPKEEP_PERCENT = 0.0048; 
 const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "146.0"; // UPDATE: Merged External Tracking Logic
+const BACKEND_VERSION = "146.1"; // UPDATE: Optimized Tracker Polling (1h)
 const PRIORITY_FEE_UNITS = 50000; 
 
 // --- EXTERNAL TRACKER CONFIG ---
@@ -163,7 +163,6 @@ let externalStatsCache = {
     wallet: { tokenPriceUsd: 0, solPriceUsd: 0, ctoFeesSol: 0, ctoFeesUsd: 0, purchasedFromSource: 0 },
     lastUpdated: 0
 };
-let cacheCycleCount = 0;
 
 function getNextDayTimestamp() {
     const now = new Date();
@@ -499,7 +498,7 @@ function computeTrackerMetrics(txs, historicalPrices) {
 // --- TRACKER LOOPS ---
 
 async function fetchAndCacheExternalData() {
-    log("[TRACKER] Updating external stats (Burn/Wallet)...", "SYS");
+    log("[TRACKER] Updating external stats (Heavy Lift - 1h)...", "SYS");
     try {
         // 1. Burn Data
         const currentSupply = await fetchCurrentTokenSupplyUi();
@@ -524,8 +523,7 @@ async function fetchAndCacheExternalData() {
 }
 
 async function fetchTokenPricesStaggered() {
-    if(cacheCycleCount % 10 !== 0) return; // Run every 10th cycle (10 mins)
-    log("[TRACKER] Updating Token Prices...", "SYS");
+    log("[TRACKER] Updating Token Prices (10m)...", "SYS");
     
     // ASDF Price
     const asdfPrice = await fetchJupiterTokenPrice(ASDF_MINT);
@@ -548,14 +546,12 @@ function startExternalTrackerService() {
     
     setTimeout(() => {
         fetchTokenPricesStaggered();
-        cacheCycleCount++;
         
-        // Fast Loop (1m)
-        setInterval(() => {
-            fetchAndCacheExternalData();
-            fetchTokenPricesStaggered();
-            cacheCycleCount++;
-        }, 60000);
+        // Heavy Lift Loop (1 hour)
+        setInterval(fetchAndCacheExternalData, 3600000);
+        
+        // Price Loop (10 minutes)
+        setInterval(fetchTokenPricesStaggered, 600000);
         
     }, 15000); // Stagger start
 }
