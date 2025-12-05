@@ -1,5 +1,104 @@
 # ASDForecast Changelog
 
+## Version 150.0 - User Features & Golden Ratio Decay
+
+### Overview
+
+This update adds user-facing features (bet history, badges, price alerts) and introduces Golden Ratio (φ) decay for referrer rewards to prevent farming while rewarding organic growth.
+
+---
+
+## New Features
+
+### 1. Bet History API
+
+**GET `/api/user/history?user=<pubKey>&limit=50&offset=0`**
+- Paginated bet history with stats
+- Returns: bets[], pagination, stats (wins, losses, winRate, totalWagered)
+
+**GET `/api/user/stats?user=<pubKey>`**
+- Overall user statistics including lottery and referral info
+
+### 2. Achievements/Badges System
+
+**11 badges available:**
+| Badge | Name | Condition |
+|-------|------|-----------|
+| FIRST_BET | First Steps | Place your first bet |
+| FIRST_WIN | Winner | Win your first frame |
+| WIN_STREAK_3 | Hot Streak | Win 3 frames in a row |
+| WINS_10/50/100 | Rising Star/Veteran/Legend | Win milestones |
+| FRAMES_100 | Dedicated | Play 100 frames |
+| VOLUME_1/10 | Trader/High Roller | Wager 1/10 SOL total |
+| REFERRER_5 | Ambassador | Refer 5 users |
+| HODLER | Diamond Hands | Hold ASDF for 4+ weeks |
+
+**GET `/api/user/badges?user=<pubKey>`** - Returns earned and available badges
+
+**WebSocket event:** `BADGE_EARNED` - Real-time notification on unlock
+
+### 3. Price Alerts (WebSocket)
+
+**Commands:**
+| Command | Description |
+|---------|-------------|
+| `SET_PRICE_ALERT` | Create alert (max 5/client) |
+| `REMOVE_PRICE_ALERT` | Delete by ID |
+| `LIST_PRICE_ALERTS` | View active alerts |
+
+**Events:** `PRICE_ALERT_SET`, `PRICE_ALERT_TRIGGERED`
+
+### 4. Admin Dashboard Stats
+
+**GET `/api/admin/stats`** (requires auth)
+- Overview: totalUsers, totalBets, totalVolume
+- Today/Week: volume, bets, uniqueUsers
+- Frame stats: totalFrames, avgBets, upWins, downWins
+- Lottery: pool, draws, totalPrizePaid
+- WebSocket: connected clients
+- System: memory, uptime
+
+### 5. Rate Limit Headers
+
+All rate-limited endpoints now return:
+- Standard: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`
+- Legacy: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+
+### 6. Golden Ratio Referrer Rate Decay
+
+**Anti-farming mechanism using φ (1.618...):**
+
+| Referrals | Rate |
+|-----------|------|
+| 0 | 0.448% (base) |
+| 1 | 0.277% |
+| 2-4 | 0.171% |
+| 5-7 | 0.106% |
+| 8-12 | 0.065% |
+| 13+ | Continues decaying... |
+
+**Formula:** `rate = baseRate / φ^floor(log_φ(n+1))`
+
+**Benefits:**
+- Rewards early/organic referrals
+- Prevents referral farming
+- Mathematically elegant decay
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `server.js` | +User APIs, +Badges, +Price Alerts, +Admin Stats, +Golden Ratio decay |
+| `config.js` | +PHI constant, +ACHIEVEMENTS config, +BASE_REFERRER_RATE |
+| `package.json` | Version 1.50.0 |
+| `README.md` | New endpoints documented |
+
+---
+
+---
+
 ## Version 149.0 - WebSocket Real-time Updates
 
 ### Overview

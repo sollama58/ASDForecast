@@ -23,7 +23,7 @@ const payoutMutex = new Mutex();
 const lotteryMutex = new Mutex();
 
 // --- WEBSOCKET CLIENT TRACKING ---
-const wsClients = new Map(); // ws -> { pubKey, connectedAt, lastPong }
+const wsClients = new Map(); // ws -> { pubKey, connectedAt, lastPong, priceAlerts }
 let wsClientCount = 0;
 
 wss.on('connection', (ws, req) => {
@@ -32,7 +32,8 @@ wss.on('connection', (ws, req) => {
         id: clientId,
         pubKey: null,
         connectedAt: Date.now(),
-        lastPong: Date.now()
+        lastPong: Date.now(),
+        priceAlerts: []  // [{ id, targetPrice, direction: 'above'|'below', triggered: false }]
     });
     console.log(`> [WS] Client ${clientId} connected (total: ${wsClients.size})`);
 
@@ -48,6 +49,46 @@ wss.on('connection', (ws, req) => {
                 }
             } else if (msg.type === 'PING') {
                 ws.send(JSON.stringify({ event: 'PONG', ts: Date.now() }));
+            } else if (msg.type === 'SET_PRICE_ALERT') {
+                // Set a price alert: { type: 'SET_PRICE_ALERT', targetPrice: 150.00, direction: 'above'|'below' }
+                const client = wsClients.get(ws);
+                if (client && msg.targetPrice && msg.direction) {
+                    const alertId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+                    // Limit to 5 alerts per client
+                    if (client.priceAlerts.length >= 5) {
+                        ws.send(JSON.stringify({ event: 'PRICE_ALERT_ERROR', data: { error: 'MAX_ALERTS_REACHED', max: 5 }, ts: Date.now() }));
+                    } else {
+                        client.priceAlerts.push({
+                            id: alertId,
+                            targetPrice: parseFloat(msg.targetPrice),
+                            direction: msg.direction === 'below' ? 'below' : 'above',
+                            triggered: false,
+                            createdAt: Date.now()
+                        });
+                        ws.send(JSON.stringify({
+                            event: 'PRICE_ALERT_SET',
+                            data: { id: alertId, targetPrice: msg.targetPrice, direction: msg.direction },
+                            ts: Date.now()
+                        }));
+                    }
+                }
+            } else if (msg.type === 'REMOVE_PRICE_ALERT') {
+                // Remove alert: { type: 'REMOVE_PRICE_ALERT', id: 'abc123' }
+                const client = wsClients.get(ws);
+                if (client && msg.id) {
+                    client.priceAlerts = client.priceAlerts.filter(a => a.id !== msg.id);
+                    ws.send(JSON.stringify({ event: 'PRICE_ALERT_REMOVED', data: { id: msg.id }, ts: Date.now() }));
+                }
+            } else if (msg.type === 'LIST_PRICE_ALERTS') {
+                // List all active alerts
+                const client = wsClients.get(ws);
+                if (client) {
+                    ws.send(JSON.stringify({
+                        event: 'PRICE_ALERTS_LIST',
+                        data: { alerts: client.priceAlerts.filter(a => !a.triggered) },
+                        ts: Date.now()
+                    }));
+                }
             }
         } catch (e) { /* ignore invalid messages */ }
     });
@@ -104,6 +145,43 @@ function wsBroadcast(event, data, filterFn = null) {
 // Broadcast to specific user by pubKey
 function wsBroadcastToUser(pubKey, event, data) {
     wsBroadcast(event, data, (client) => client.pubKey === pubKey);
+}
+
+// Check price alerts for all connected clients
+function checkPriceAlerts(currentPrice) {
+    for (const [ws, client] of wsClients) {
+        if (!client.priceAlerts || client.priceAlerts.length === 0) continue;
+        if (ws.readyState !== WebSocket.OPEN) continue;
+
+        for (const alert of client.priceAlerts) {
+            if (alert.triggered) continue;
+
+            let triggered = false;
+            if (alert.direction === 'above' && currentPrice >= alert.targetPrice) {
+                triggered = true;
+            } else if (alert.direction === 'below' && currentPrice <= alert.targetPrice) {
+                triggered = true;
+            }
+
+            if (triggered) {
+                alert.triggered = true;
+                ws.send(JSON.stringify({
+                    event: 'PRICE_ALERT_TRIGGERED',
+                    data: {
+                        id: alert.id,
+                        targetPrice: alert.targetPrice,
+                        direction: alert.direction,
+                        currentPrice: currentPrice,
+                        message: `SOL price ${alert.direction === 'above' ? 'reached' : 'dropped to'} $${currentPrice.toFixed(2)}`
+                    },
+                    ts: Date.now()
+                }));
+            }
+        }
+
+        // Clean up triggered alerts
+        client.priceAlerts = client.priceAlerts.filter(a => !a.triggered);
+    }
 }
 
 app.set('trust proxy', 1);
@@ -176,40 +254,41 @@ function isValidSolanaAddress(address) { return typeof address === 'string' && S
 function isValidSignature(signature) { return typeof signature === 'string' && SIGNATURE_REGEX.test(signature); }
 
 // --- RATE LIMIT (from config.js) ---
+// Headers: RateLimit-* (standard) + X-RateLimit-* (legacy) for broad compatibility
 const betLimiter = rateLimit({
     windowMs: config.RATE_LIMITS.BET.windowMs,
     max: config.RATE_LIMITS.BET.max,
-    message: { error: "RATE_LIMIT_EXCEEDED" },
+    message: { error: "RATE_LIMIT_EXCEEDED", retryAfter: Math.ceil(config.RATE_LIMITS.BET.windowMs / 1000) },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: true  // X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
 });
 const stateLimiter = rateLimit({
     windowMs: config.RATE_LIMITS.STATE.windowMs,
     max: config.RATE_LIMITS.STATE.max,
-    message: { error: "POLLING_LIMIT_EXCEEDED" },
+    message: { error: "POLLING_LIMIT_EXCEEDED", retryAfter: Math.ceil(config.RATE_LIMITS.STATE.windowMs / 1000) },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: true
 });
 const voteLimiter = rateLimit({
     windowMs: config.RATE_LIMITS.VOTE.windowMs,
     max: config.RATE_LIMITS.VOTE.max,
-    message: { error: "IP_COOLDOWN_ACTIVE" },
+    message: { error: "IP_COOLDOWN_ACTIVE", retryAfter: Math.ceil(config.RATE_LIMITS.VOTE.windowMs / 1000) },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: true
 });
 const claimLimiter = rateLimit({
     windowMs: config.RATE_LIMITS.CLAIM.windowMs,
     max: config.RATE_LIMITS.CLAIM.max,
-    message: { error: "CLAIM_RATE_LIMIT" },
+    message: { error: "CLAIM_RATE_LIMIT", retryAfter: Math.ceil(config.RATE_LIMITS.CLAIM.windowMs / 1000) },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: true
 });
 const registerLimiter = rateLimit({
     windowMs: config.RATE_LIMITS.REGISTER.windowMs,
     max: config.RATE_LIMITS.REGISTER.max,
-    message: { error: "REGISTER_RATE_LIMIT" },
+    message: { error: "REGISTER_RATE_LIMIT", retryAfter: Math.ceil(config.RATE_LIMITS.REGISTER.windowMs / 1000) },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: true
 });
 
 // --- PERSISTENCE ---
@@ -719,19 +798,34 @@ async function getASDF_Price() {
     return priceData.priceInSol;
 }
 
+// Golden Ratio (φ) decay for referrer rewards - prevents farming, rewards organic growth
+// Rate decreases as referrer accumulates more referrals: 0.448% → 0.277% → 0.171% → ...
+function getReferrerRate(numReferrals) {
+    const PHI = config.PHI;
+    const baseRate = REFERRAL_CONFIG.BASE_REFERRER_RATE;
+    // Formula: baseRate / φ^floor(log_φ(n+1))
+    const exponent = Math.floor(Math.log(numReferrals + 1) / Math.log(PHI));
+    return baseRate / Math.pow(PHI, exponent);
+}
+
 // Calculate and accumulate referral rewards based on BET AMOUNT (not fees)
 // Rewards stored in SOL value, converted to ASDF at claim time
 async function processReferralRewards(userPubKey, betAmountSol) {
     const referrerPubKey = referralData.userToReferrer[userPubKey];
     if (!referrerPubKey || !referralData.links[referrerPubKey]) {
-        return { userRebate: 0, referrerReward: 0 }; // No referrer for this user
+        return { userRebate: 0, referrerReward: 0, referrerRate: 0 }; // No referrer for this user
     }
 
-    // Calculate rewards based on BET AMOUNT (552 SYMMETRY)
-    // Filleul (active user) gets MORE: 0.552%
-    // Parrain (referrer) gets LESS: 0.448%
+    // Get referrer's current referral count for dynamic rate
+    const referrerLink = referralData.links[referrerPubKey];
+    const numReferrals = referrerLink.referredUsers ? referrerLink.referredUsers.length : 0;
+
+    // Calculate rewards based on BET AMOUNT (552 SYMMETRY + Golden Ratio Decay)
+    // Filleul (active user) gets FIXED: 0.552%
+    // Parrain (referrer) gets DYNAMIC: 0.448% decaying with φ
     const userRebate = betAmountSol * REFERRAL_CONFIG.USER_REBATE_PERCENT;
-    const referrerReward = betAmountSol * REFERRAL_CONFIG.REFERRER_REWARD_PERCENT;
+    const referrerRate = getReferrerRate(numReferrals);
+    const referrerReward = betAmountSol * referrerRate;
 
     // Initialize pending rewards if needed
     if (!referralData.pendingRewards) referralData.pendingRewards = {};
@@ -753,7 +847,7 @@ async function processReferralRewards(userPubKey, betAmountSol) {
     }
     referralData.links[referrerPubKey].totalVolumeGenerated += betAmountSol;
 
-    return { userRebate, referrerReward };
+    return { userRebate, referrerReward, referrerRate };
 }
 
 // --- LOTTERY ON-CHAIN QUERIES ---
@@ -1922,11 +2016,13 @@ async function closeFrame(closePrice, closeTime) {
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
-                userData.frameLog[frameId] = { 
+                userData.frameLog[frameId] = {
                     dir: userDir, result: outcome, time: Date.now(),
                     upShares: pos.up, downShares: pos.down, wagered: pos.sol
                 };
                 await saveUser(pubKey, userData);
+                // Check for new badges after updating stats
+                await checkAndAwardBadges(pubKey, userData, { outcome });
             }));
         }
 
@@ -1990,6 +2086,9 @@ async function updatePrice() {
                 change: percentChange,
                 timestamp: gameState.lastPriceTimestamp
             });
+
+            // Check price alerts for all connected clients
+            checkPriceAlerts(fetchedPrice);
 
             const currentWindowStart = getCurrentWindowStart();
 
@@ -2155,13 +2254,13 @@ function updatePublicStateCache() {
                 allocationPercent: LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT * 100
             };
         })(),
-        // Referral summary - 552 SYMMETRY (Gambler-Holder Alignment)
+        // Referral summary - 552 SYMMETRY + Golden Ratio Decay
         referral: {
             totalReferrers: Object.keys(referralData.links).length,
             totalReferred: Object.keys(referralData.userToReferrer).length,
-            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% to user (filleul)
-            referrerRewardPercent: REFERRAL_CONFIG.REFERRER_REWARD_PERCENT * 100, // 0.448% to referrer (parrain)
-            totalRedistributed: 1.0,  // 1% of bet volume redistributed
+            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed (filleul)
+            baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base (parrain)
+            referrerDecay: 'golden_ratio',  // Rate decays with φ as referrals increase
             minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
             rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
         }
@@ -2758,9 +2857,11 @@ app.get('/api/referral/stats', stateLimiter, async (req, res) => {
                 claimRatio: REFERRAL_CONFIG.CLAIM_RATIO,
                 asdfPriceSOL: asdfPrice
             },
-            // Config
-            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552%
-            referrerRewardPercent: REFERRAL_CONFIG.REFERRER_REWARD_PERCENT * 100, // 0.448%
+            // Config - Golden Ratio Decay
+            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed
+            baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base
+            currentReferrerRate: referrerData ? getReferrerRate(referrerData.referredUsers?.length || 0) * 100 : REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,
+            referrerDecay: 'golden_ratio',  // φ-based decay
             minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
             rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY,
             // Price status
@@ -2864,6 +2965,247 @@ app.post('/api/referral/claim', claimLimiter, async (req, res) => {
     }
 });
 
+// ===================
+// USER BET HISTORY API
+// ===================
+
+// Get user's bet history with stats
+app.get('/api/user/history', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);  // Max 100
+    const offset = parseInt(req.query.offset) || 0;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const frameLog = userData.frameLog || {};
+
+        // Convert frameLog object to sorted array (newest first)
+        const allBets = Object.entries(frameLog)
+            .map(([frameId, bet]) => ({
+                frameId: parseInt(frameId),
+                timestamp: bet.time,
+                direction: bet.dir,
+                result: bet.result,
+                upShares: bet.upShares || 0,
+                downShares: bet.downShares || 0,
+                wagered: bet.wagered || 0
+            }))
+            .sort((a, b) => b.frameId - a.frameId);
+
+        // Calculate stats
+        const totalBets = allBets.length;
+        const wins = allBets.filter(b => b.result === 'WIN').length;
+        const losses = allBets.filter(b => b.result === 'LOSS').length;
+        const totalWagered = allBets.reduce((sum, b) => sum + b.wagered, 0);
+        const winRate = totalBets > 0 ? (wins / totalBets * 100).toFixed(2) : 0;
+
+        // Paginate
+        const paginatedBets = allBets.slice(offset, offset + limit);
+
+        res.json({
+            user: userKey,
+            stats: {
+                totalBets,
+                wins,
+                losses,
+                winRate: parseFloat(winRate),
+                totalWagered: parseFloat(totalWagered.toFixed(6)),
+                framesPlayed: userData.framesPlayed || 0
+            },
+            pagination: {
+                limit,
+                offset,
+                total: totalBets,
+                hasMore: offset + limit < totalBets
+            },
+            bets: paginatedBets
+        });
+    } catch (e) {
+        console.error(`> [USER] History error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "HISTORY_ERROR" });
+    }
+});
+
+// ===================
+// ACHIEVEMENTS SYSTEM
+// ===================
+
+const BADGES = config.ACHIEVEMENTS.BADGES;
+
+// Check and award badges based on user stats
+async function checkAndAwardBadges(pubKey, userData, context = {}) {
+    if (!userData.badges) userData.badges = [];
+    const existingBadges = new Set(userData.badges.map(b => b.id));
+    const newBadges = [];
+
+    const frameLog = userData.frameLog || {};
+    const bets = Object.values(frameLog);
+    const totalWagered = bets.reduce((sum, b) => sum + (b.wagered || 0), 0);
+    const wins = userData.wins || 0;
+    const framesPlayed = userData.framesPlayed || 0;
+
+    // FIRST_BET - Place your first bet
+    if (framesPlayed >= 1 && !existingBadges.has('FIRST_BET')) {
+        newBadges.push({ id: 'FIRST_BET', earnedAt: Date.now() });
+    }
+
+    // FIRST_WIN - Win your first frame
+    if (wins >= 1 && !existingBadges.has('FIRST_WIN')) {
+        newBadges.push({ id: 'FIRST_WIN', earnedAt: Date.now() });
+    }
+
+    // WIN_STREAK_3 - Win 3 in a row (check from context)
+    if (context.winStreak >= 3 && !existingBadges.has('WIN_STREAK_3')) {
+        newBadges.push({ id: 'WIN_STREAK_3', earnedAt: Date.now() });
+    }
+
+    // WINS_10, WINS_50, WINS_100
+    if (wins >= 10 && !existingBadges.has('WINS_10')) {
+        newBadges.push({ id: 'WINS_10', earnedAt: Date.now() });
+    }
+    if (wins >= 50 && !existingBadges.has('WINS_50')) {
+        newBadges.push({ id: 'WINS_50', earnedAt: Date.now() });
+    }
+    if (wins >= 100 && !existingBadges.has('WINS_100')) {
+        newBadges.push({ id: 'WINS_100', earnedAt: Date.now() });
+    }
+
+    // FRAMES_100 - Play 100 frames
+    if (framesPlayed >= 100 && !existingBadges.has('FRAMES_100')) {
+        newBadges.push({ id: 'FRAMES_100', earnedAt: Date.now() });
+    }
+
+    // VOLUME_1, VOLUME_10 - Total wagered
+    if (totalWagered >= 1 && !existingBadges.has('VOLUME_1')) {
+        newBadges.push({ id: 'VOLUME_1', earnedAt: Date.now() });
+    }
+    if (totalWagered >= 10 && !existingBadges.has('VOLUME_10')) {
+        newBadges.push({ id: 'VOLUME_10', earnedAt: Date.now() });
+    }
+
+    // REFERRER_5 - Refer 5 users
+    const referrerData = referralData.links[pubKey];
+    if (referrerData && (referrerData.referredUsers?.length || 0) >= 5 && !existingBadges.has('REFERRER_5')) {
+        newBadges.push({ id: 'REFERRER_5', earnedAt: Date.now() });
+    }
+
+    // HODLER - Hold ASDF for 4+ weeks
+    if (userData.lottery?.weeksHolding >= 4 && !existingBadges.has('HODLER')) {
+        newBadges.push({ id: 'HODLER', earnedAt: Date.now() });
+    }
+
+    // Award new badges
+    if (newBadges.length > 0) {
+        userData.badges.push(...newBadges);
+        await saveUser(pubKey, userData);
+
+        // Notify via WebSocket
+        for (const badge of newBadges) {
+            const badgeInfo = BADGES[badge.id];
+            wsBroadcastToUser(pubKey, 'BADGE_EARNED', {
+                id: badge.id,
+                name: badgeInfo.name,
+                description: badgeInfo.description,
+                icon: badgeInfo.icon,
+                earnedAt: badge.earnedAt
+            });
+        }
+    }
+
+    return newBadges;
+}
+
+// Get user's badges
+app.get('/api/user/badges', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const userBadges = userData.badges || [];
+
+        // Enrich badges with metadata
+        const enrichedBadges = userBadges.map(badge => ({
+            ...badge,
+            ...BADGES[badge.id]
+        }));
+
+        // List all available badges with earned status
+        const allBadges = Object.entries(BADGES).map(([id, info]) => {
+            const earned = userBadges.find(b => b.id === id);
+            return {
+                id,
+                ...info,
+                earned: !!earned,
+                earnedAt: earned?.earnedAt || null
+            };
+        });
+
+        res.json({
+            user: userKey,
+            earned: enrichedBadges,
+            earnedCount: enrichedBadges.length,
+            totalBadges: Object.keys(BADGES).length,
+            allBadges
+        });
+    } catch (e) {
+        console.error(`> [USER] Badges error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "BADGES_ERROR" });
+    }
+});
+
+// Get user's overall stats (quick endpoint)
+app.get('/api/user/stats', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const frameLog = userData.frameLog || {};
+        const bets = Object.values(frameLog);
+
+        const totalWagered = bets.reduce((sum, b) => sum + (b.wagered || 0), 0);
+        const totalBets = bets.length;
+        const wins = userData.wins || 0;
+        const losses = userData.losses || 0;
+
+        res.json({
+            user: userKey,
+            framesPlayed: userData.framesPlayed || 0,
+            wins,
+            losses,
+            winRate: totalBets > 0 ? parseFloat((wins / totalBets * 100).toFixed(2)) : 0,
+            totalWagered: parseFloat(totalWagered.toFixed(6)),
+            totalBets,
+            // Lottery stats
+            lottery: {
+                isEligible: userData.lottery?.isEligible || false,
+                weeksHolding: userData.lottery?.weeksHolding || 0,
+                currentBalance: userData.lottery?.currentBalance || 0
+            },
+            // Referral stats
+            referral: {
+                referredBy: userData.referredBy ? true : false,
+                referredAt: userData.referredAt || null
+            },
+            createdAt: userData.createdAt || null
+        });
+    } catch (e) {
+        console.error(`> [USER] Stats error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "STATS_ERROR" });
+    }
+});
+
 // Admin: Get global referral stats (552 SYMMETRY)
 app.get('/api/admin/referral/stats', (req, res) => {
     const auth = req.headers['x-admin-secret'];
@@ -2899,12 +3241,127 @@ app.get('/api/admin/referral/stats', (req, res) => {
             totalSOL: totalPendingReferrerSOL + totalPendingUserSOL
         },
         totalClaimedASDF,
-        // Config
-        userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552%
-        referrerRewardPercent: REFERRAL_CONFIG.REFERRER_REWARD_PERCENT * 100, // 0.448%
+        // Config - Golden Ratio Decay
+        userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed
+        baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base (decays with φ)
+        referrerDecay: 'golden_ratio',
         minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
         rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
     });
+});
+
+// Admin: Comprehensive dashboard stats
+app.get('/api/admin/stats', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) {
+        return res.status(403).json({ error: "UNAUTHORIZED" });
+    }
+
+    try {
+        // Get user count from users directory
+        const userFiles = await fs.readdir(USERS_DIR).catch(() => []);
+        const totalUsers = userFiles.filter(f => f.endsWith('.json')).length;
+
+        // Calculate today's stats from history
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todayTs = today.getTime();
+
+        const todayFrames = historySummary.filter(f => f.startTime >= todayTs);
+        const todayVolume = todayFrames.reduce((sum, f) => sum + f.totalSol, 0);
+        const todayFees = todayFrames.reduce((sum, f) => sum + f.fee, 0);
+        const todayUsers = new Set(todayFrames.flatMap(f => Object.keys(f.users || {}))).size;
+
+        // Calculate 7-day rolling stats
+        const weekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        const weekFrames = historySummary.filter(f => f.startTime >= weekAgo);
+        const weekVolume = weekFrames.reduce((sum, f) => sum + f.totalSol, 0);
+        const weekFees = weekFrames.reduce((sum, f) => sum + f.fee, 0);
+
+        // Frame stats
+        const totalFrames = historySummary.length;
+        const upWins = historySummary.filter(f => f.result === 'UP').length;
+        const downWins = historySummary.filter(f => f.result === 'DOWN').length;
+        const flatFrames = historySummary.filter(f => f.result === 'FLAT').length;
+
+        // Average metrics
+        const avgVolPerFrame = totalFrames > 0 ? globalStats.totalVolume / totalFrames : 0;
+        const avgUsersPerFrame = totalFrames > 0 ? historySummary.reduce((sum, f) => sum + (f.users || 0), 0) / totalFrames : 0;
+
+        // Current frame status
+        const currentFrame = {
+            id: gameState.candleStartTime,
+            upShares: gameState.poolShares?.up || 50,
+            downShares: gameState.poolShares?.down || 50,
+            betsCount: gameState.bets?.length || 0,
+            totalSol: gameState.bets?.reduce((sum, b) => sum + b.costSol, 0) || 0,
+            startPrice: gameState.candleOpen,
+            currentPrice: gameState.price,
+            isPaused: gameState.isPaused
+        };
+
+        // System metrics
+        const memUsage = process.memoryUsage();
+        const uptimeSec = process.uptime();
+
+        res.json({
+            // Overview
+            overview: {
+                totalUsers,
+                totalFrames,
+                totalVolume: parseFloat(globalStats.totalVolume.toFixed(4)),
+                totalFees: parseFloat(globalStats.totalFees.toFixed(4)),
+                totalWinnings: parseFloat(globalStats.totalWinnings.toFixed(4))
+            },
+            // Today
+            today: {
+                frames: todayFrames.length,
+                volume: parseFloat(todayVolume.toFixed(4)),
+                fees: parseFloat(todayFees.toFixed(4)),
+                uniqueUsers: todayUsers
+            },
+            // Last 7 days
+            week: {
+                frames: weekFrames.length,
+                volume: parseFloat(weekVolume.toFixed(4)),
+                fees: parseFloat(weekFees.toFixed(4)),
+                avgVolumePerDay: parseFloat((weekVolume / 7).toFixed(4))
+            },
+            // Frame distribution
+            frameStats: {
+                upWins,
+                downWins,
+                flatFrames,
+                upWinRate: totalFrames > 0 ? parseFloat((upWins / totalFrames * 100).toFixed(2)) : 0,
+                downWinRate: totalFrames > 0 ? parseFloat((downWins / totalFrames * 100).toFixed(2)) : 0,
+                avgVolumePerFrame: parseFloat(avgVolPerFrame.toFixed(4)),
+                avgUsersPerFrame: parseFloat(avgUsersPerFrame.toFixed(2))
+            },
+            // Current frame
+            currentFrame,
+            // Lottery
+            lottery: {
+                round: lotteryState.currentRound,
+                pool: lotteryState.prizePool,
+                threshold: config.LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD,
+                nextDrawEligible: lotteryState.prizePool >= config.LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD
+            },
+            // WebSocket
+            websocket: {
+                connectedClients: wsClients.size
+            },
+            // System
+            system: {
+                version: BACKEND_VERSION,
+                uptime: Math.floor(uptimeSec),
+                memoryMB: Math.floor(memUsage.heapUsed / 1024 / 1024),
+                payoutQueueLength: payoutQueue.length
+            }
+        });
+    } catch (e) {
+        console.error('> [ADMIN] Stats error:', e.message);
+        res.status(500).json({ error: "STATS_ERROR" });
+    }
 });
 
 // --- LOTTERY SCHEDULED TASK ---

@@ -7,7 +7,7 @@ Prediction market platform on Solana for SOL price movements with ASDF token lot
 - **15-minute price prediction frames** - Bet UP or DOWN on SOL price
 - **Dynamic pricing** - Share prices adjust based on market demand
 - **ASDF Lottery** - Weekly draws for eligible ASDF holders
-- **Referral Flywheel** - 552 SYMMETRY rewards for referrers and referred users
+- **Referral Flywheel** - 552 SYMMETRY rewards with Golden Ratio (φ) decay for referrers
 - **On-chain ASDF price** - Direct price calculation from PumpSwap pool reserves
 - **Sentiment voting** - Daily community sentiment polls
 - **Real-time updates** - Live price feeds via Pyth Oracle
@@ -79,6 +79,9 @@ python3 -m http.server 8080
 | `/api/referral/register` | POST | Register with referral code |
 | `/api/referral/stats` | GET | Referral statistics |
 | `/api/referral/claim` | POST | Claim referral rewards |
+| `/api/user/history` | GET | Paginated bet history |
+| `/api/user/stats` | GET | User statistics |
+| `/api/user/badges` | GET | User achievements/badges |
 
 ### Admin (requires `x-admin-secret` header)
 | Endpoint | Method | Description |
@@ -87,6 +90,7 @@ python3 -m http.server 8080
 | `/api/admin/cancel-frame` | POST | Cancel current frame |
 | `/api/admin/broadcast` | POST | Set broadcast message |
 | `/api/admin/lottery/draw` | POST | Trigger manual lottery draw |
+| `/api/admin/stats` | GET | Comprehensive dashboard stats |
 
 ## Lottery System
 
@@ -113,7 +117,7 @@ python3 -m http.server 8080
 
 ## Version
 
-- **Backend**: v149.0
+- **Backend**: v150.0
 - **Frontend**: v122.0
 
 ## Security

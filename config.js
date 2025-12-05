@@ -9,7 +9,7 @@ module.exports = {
     // ===================
     // VERSION
     // ===================
-    BACKEND_VERSION: "149.0",
+    BACKEND_VERSION: "150.0",
 
     // ===================
     // SOLANA ADDRESSES
@@ -57,16 +57,23 @@ module.exports = {
     },
 
     // ===================
-    // REFERRAL CONFIG (552 SYMMETRY)
+    // GOLDEN RATIO (φ)
+    // ===================
+    PHI: 1.618033988749895,
+
+    // ===================
+    // REFERRAL CONFIG (552 SYMMETRY + Golden Ratio Decay)
     // ===================
     REFERRAL_CONFIG: {
-        USER_REBATE_PERCENT: 0.00552,         // 0.552% rebate to user
-        REFERRER_REWARD_PERCENT: 0.00448,     // 0.448% to referrer
+        USER_REBATE_PERCENT: 0.00552,         // 0.552% rebate to user (fixed)
+        BASE_REFERRER_RATE: 0.00448,          // 0.448% base rate (decays with φ)
         MIN_ASDF_TO_REFER: 55200,             // Min ASDF to create code
         CODE_LENGTH: 8,
         MAX_REFERRALS_PER_USER: 100,
         REWARD_CURRENCY: 'ASDF',
         CLAIM_RATIO: 1.0
+        // Rate decay: 0.448% → 0.277% → 0.171% → 0.106% → 0.065%...
+        // Formula: baseRate / φ^floor(log_φ(n+1))
     },
 
     // ===================
@@ -100,6 +107,26 @@ module.exports = {
         HEARTBEAT_INTERVAL: 30000,      // 30s ping/pong
         STATE_BROADCAST_THROTTLE: 500,  // 500ms min between state broadcasts
         RECONNECT_BACKOFF_MAX: 30000    // 30s max reconnect delay
+    },
+
+    // ===================
+    // ACHIEVEMENTS (Badges)
+    // ===================
+    ACHIEVEMENTS: {
+        // Badge definitions: id -> { name, description, condition }
+        BADGES: {
+            FIRST_BET: { name: 'First Steps', description: 'Place your first bet', icon: '🎲' },
+            FIRST_WIN: { name: 'Winner', description: 'Win your first frame', icon: '🏆' },
+            WIN_STREAK_3: { name: 'Hot Streak', description: 'Win 3 frames in a row', icon: '🔥' },
+            WINS_10: { name: 'Rising Star', description: 'Win 10 frames', icon: '⭐' },
+            WINS_50: { name: 'Veteran', description: 'Win 50 frames', icon: '🎖️' },
+            WINS_100: { name: 'Legend', description: 'Win 100 frames', icon: '👑' },
+            FRAMES_100: { name: 'Dedicated', description: 'Play 100 frames', icon: '💪' },
+            VOLUME_1: { name: 'Trader', description: 'Wager 1 SOL total', icon: '💰' },
+            VOLUME_10: { name: 'High Roller', description: 'Wager 10 SOL total', icon: '💎' },
+            REFERRER_5: { name: 'Ambassador', description: 'Refer 5 users', icon: '🤝' },
+            HODLER: { name: 'Diamond Hands', description: 'Hold ASDF for 4+ weeks', icon: '💎' }
+        }
     },
 
     // ===================
