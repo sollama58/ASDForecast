@@ -1,4 +1,4 @@
-<!-- ASDForecast CONTROL PANEL v1.8.2 // FIX: History Time Displays Frame Close Time -->
+<!-- ASDForecast CONTROL PANEL v1.4 // LOTTERY + BROADCAST MERGE -->
 
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -70,6 +70,11 @@
                 ⚠️ Cancel
             </button>
 
+            <!-- LOTTERY DRAW -->
+            <button onclick="triggerLotteryDraw()" class="bg-purple-900 border border-purple-500 text-purple-200 px-4 py-2 rounded text-xs font-bold hover:bg-purple-600 hover:text-white transition-colors uppercase">
+                🎟️ Lottery Draw
+            </button>
+
             <!-- CONNECTION STATUS -->
             <div id="status-box" class="flex items-center gap-2 px-3 py-1 bg-black border border-gray-800 rounded h-10">
                 <span class="w-2 h-2 rounded-full bg-gray-500" id="status-dot"></span>
@@ -86,10 +91,34 @@
         <div class="panel"> <div class="stat-label">SOL Price</div> <div id="val-price" class="stat-value">$0.00</div> </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-        <!-- MARKET DEPTH -->
-        <div class="panel">
-            <h3 class="text-orange-500 font-bold mb-4 border-b border-orange-900/30 pb-2">MARKET DEPTH</h3>
+    <!-- LOTTERY STATUS -->
+    <div class="panel mb-8 border-purple-900/50">
+        <h3 class="text-purple-400 font-bold mb-4 border-b border-purple-900/30 pb-2">🎟️ LOTTERY STATUS</h3>
+        <div class="grid grid-cols-4 gap-4">
+            <div>
+                <div class="stat-label text-purple-700">Current Round</div>
+                <div id="val-lottery-round" class="text-xl font-bold text-white">#--</div>
+            </div>
+            <div>
+                <div class="stat-label text-purple-700">Next Draw</div>
+                <div id="val-lottery-countdown" class="text-xl font-bold text-purple-400">--</div>
+            </div>
+            <div>
+                <div class="stat-label text-purple-700">Last Winner</div>
+                <div id="val-lottery-winner" class="text-xl font-bold text-green-400">--</div>
+            </div>
+            <div>
+                <div class="stat-label text-purple-700">Last Prize</div>
+                <div id="val-lottery-prize" class="text-xl font-bold text-yellow-400">-- ASDF</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MARKET DEPTH -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+        <!-- UP SIDE -->
+        <div class="panel border-green-900/50">
+            <h3 class="text-green-500 font-bold mb-4 border-b border-green-900/30 pb-2">UP POOL 📈</h3>
             <div class="grid grid-cols-2 gap-4">
                 <div class="bg-green-900/20 p-4 rounded border border-green-900/50"> 
                     <div class="stat-label text-green-500">UP Price</div> <div id="val-up-price" class="text-xl font-bold text-white">0.000 SOL</div>
@@ -172,8 +201,8 @@
     </div>
 
     <!-- FULL HISTORY MODAL (UPDATED V1.8: ADDED OPEN/CLOSE) -->
-    <div id="full-history-modal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center">
-        <div class="bg-[#1a0f0a] border-2 border-orange-600 rounded-lg w-11/12 h-5/6 max-w-6xl flex flex-col shadow-2xl">
+    <div id="full-history-modal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center" onclick="if(event.target === this) this.classList.add('hidden')">
+        <div class="bg-[#1a0f0a] border-2 border-orange-600 rounded-lg w-11/12 h-5/6 max-w-6xl flex flex-col shadow-2xl" onclick="event.stopPropagation()">
             <div class="p-4 border-b border-orange-900 flex justify-between items-center bg-black/50">
                 <h2 class="text-xl font-bold text-white">FULL FRAME HISTORY</h2>
                 <div class="flex gap-4">
@@ -214,7 +243,12 @@
 </div>
 
 <script>
-    const API_URL = 'https://asdforecast.onrender.com/api';
+    const IS_LOCAL = ['localhost', '127.0.0.1'].includes(window.location.hostname) || window.location.hostname.includes('github.dev');
+    const API_URL = IS_LOCAL
+        ? (window.location.hostname.includes('github.dev')
+            ? window.location.origin.replace('-8080.', '-3000.') + '/api'
+            : 'http://localhost:3000/api')
+        : 'https://asdforecast.onrender.com/api';
     
     let fullHistory = [];
     let cachedAdminPassword = null;
@@ -239,7 +273,13 @@
         queueCount: document.getElementById('queue-count'),
         payoutHistoryRows: document.getElementById('payout-history-rows'),
         historyRows: document.getElementById('history-rows'),
-        fullHistoryRows: document.getElementById('full-history-rows')
+        historyContainer: document.getElementById('history-container'),
+        btnExpand: document.getElementById('btn-expand-history'),
+        // Lottery UI
+        lotteryRound: document.getElementById('val-lottery-round'),
+        lotteryCountdown: document.getElementById('val-lottery-countdown'),
+        lotteryWinner: document.getElementById('val-lottery-winner'),
+        lotteryPrize: document.getElementById('val-lottery-prize')
     };
 
     function getPassword() {
@@ -266,12 +306,13 @@
 
     async function cancelFrame() {
         if (!confirm("⚠️ DANGER: CANCEL THIS FRAME? This refunds 99% of bets and PAUSES the market.")) return;
-        const pwd = getPassword();
+
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
         if (!pwd) return;
         try {
             const res = await fetch(`${API_URL}/admin/cancel-frame`, {
                 method: 'POST',
-                headers: { 'x-admin-secret': pwd } 
+                headers: { 'x-admin-secret': pwd }
             });
             const data = await res.json();
             if (data.success) alert("Frame Cancelled. Market Paused.");
@@ -282,7 +323,7 @@
     async function updateBroadcast(isActive) {
         const msg = ui.broadcastMsg.value;
         if (!msg && isActive) return alert("Please enter a message first.");
-        const pwd = getPassword();
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
         if (!pwd) return;
         try {
             const res = await fetch(`${API_URL}/admin/broadcast`, {
@@ -292,127 +333,41 @@
             });
             const data = await res.json();
             if (data.success) alert(`Broadcast Updated: ${isActive ? "ON" : "OFF"}`);
-            else { alert("Error: " + data.error); cachedAdminPassword = null; }
+            else alert("Error: " + data.error);
         } catch (e) { alert("Network Error"); }
     }
 
-    // --- DATA FETCHING ---
-    async function fetchLogs() {
-        const pwd = cachedAdminPassword;
-        if (!pwd) return; 
-        try {
-            const res = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-secret': pwd } });
-            if (res.status === 403) return; 
-            const data = await res.json();
-            if (data.logs) {
-                ui.logsContainer.innerText = data.logs.join('\n');
-                if(isLogAutoScroll) ui.logsContainer.scrollTop = ui.logsContainer.scrollHeight;
-            }
-        } catch (e) { console.log("Log fetch error", e); }
-    }
+    async function triggerLotteryDraw() {
+        if (!confirm("🎟️ TRIGGER MANUAL LOTTERY DRAW? This will select a winner now regardless of schedule.")) return;
 
-    async function fetchPayouts() {
-        const pwd = cachedAdminPassword;
-        if (!pwd) return; 
-        try {
-            const res = await fetch(`${API_URL}/admin/payouts`, { headers: { 'x-admin-secret': pwd } });
-            if (res.status === 403) return; 
-            const data = await res.json();
-            
-            if (data.queue && data.queue.length > 0) {
-                ui.queueCount.innerText = `${data.queue.length} Batches`;
-                ui.queueRows.innerHTML = data.queue.map(q => `
-                    <tr class="border-b border-gray-800 hover:bg-white/5">
-                        <td class="py-1 text-yellow-200">${q.type}</td>
-                        <td class="py-1">${q.recipients?.length || 0} addrs</td>
-                        <td class="py-1 text-red-400">${q.retries || 0}</td>
-                    </tr>
-                `).join('');
-            } else {
-                ui.queueCount.innerText = "Empty";
-                ui.queueRows.innerHTML = '<tr><td colspan="3" class="py-2 text-center italic opacity-50">Queue Empty</td></tr>';
-            }
-
-            if (data.history && data.history.length > 0) {
-                ui.payoutHistoryRows.innerHTML = data.history.map(h => {
-                    const time = new Date(h.timestamp).toLocaleTimeString();
-                    return `
-                    <tr class="border-b border-gray-800 hover:bg-white/5">
-                        <td class="py-1 text-gray-400">${time}</td>
-                        <td class="py-1 text-green-200">${h.type}</td>
-                        <td class="py-1 font-bold">${h.totalAmount}</td>
-                        <td class="py-1"><a href="https://solscan.io/tx/${h.signature}" target="_blank" class="text-blue-400 hover:underline">View ↗</a></td>
-                    </tr>`;
-                }).join('');
-            } else {
-                ui.payoutHistoryRows.innerHTML = '<tr><td colspan="4" class="py-2 text-center italic opacity-50">No History</td></tr>';
-            }
-        } catch (e) { console.log("Payout fetch error", e); }
-    }
-
-    // NEW: FULL HISTORY
-    async function openFullHistory() {
-        const pwd = getPassword();
+        const pwd = prompt("ENTER ADMIN ACTION PASSWORD:");
         if (!pwd) return;
+
         try {
-            const res = await fetch(`${API_URL}/admin/full-history`, { headers: { 'x-admin-secret': pwd } });
+            const res = await fetch(`${API_URL}/admin/lottery/draw`, {
+                method: 'POST',
+                headers: { 'x-admin-secret': pwd }
+            });
             const data = await res.json();
-            if(data.history) {
-                allFramesData = data.history;
-                renderFullHistory(allFramesData);
-                document.getElementById('full-history-modal').classList.remove('hidden');
+            if (data.success) {
+                alert(`🎉 LOTTERY DRAW COMPLETE!\n\nRound: ${data.round}\nWinner: ${data.winner.slice(0,8)}...\nPrize: ${data.prize.toLocaleString()} ASDF\nTotal Tickets: ${data.totalTickets}\nParticipants: ${data.participantCount}`);
+            } else {
+                alert("Draw failed: " + (data.reason || data.error));
             }
-        } catch(e) { alert("Fetch failed"); }
+        } catch (e) {
+            console.error(e);
+            alert("Network Error");
+        }
     }
 
-    function renderFullHistory(data) {
-        ui.fullHistoryRows.innerHTML = data.map(f => {
-            // Use EndTime for display in the modal table
-            const timeVal = f.endTime || f.time;
-            const time = new Date(timeVal).toLocaleString();
-            
-            let resColor = 'text-gray-400';
-            if (f.result === 'UP') resColor = 'text-green-400 font-bold';
-            if (f.result === 'DOWN') resColor = 'text-red-400 font-bold';
-            if (f.result === 'CANCELLED') resColor = 'text-red-600 font-bold';
-
-            // Vault Delta Calculation
-            const vStart = f.vStart || 0;
-            const vEnd = f.vEnd || 0;
-            const vDiff = vEnd - vStart;
-            const vDiffSign = vDiff >= 0 ? '+' : '';
-            const vDiffColor = vDiff >= 0 ? 'text-green-400' : 'text-red-400';
-
-            return `
-                <tr class="hover:bg-white/5 border-b border-orange-900/20">
-                    <td class="py-2 pl-2 whitespace-nowrap">${time}</td>
-                    <td class="py-2 ${resColor}">${f.result}</td>
-                    
-                    <!-- ADDED: Open / Close -->
-                    <td class="py-2 text-right text-gray-300">$${(f.open||0).toFixed(2)}</td>
-                    <td class="py-2 text-right text-gray-300">$${(f.close||0).toFixed(2)}</td>
-                    
-                    <td class="py-2 text-right font-bold text-white">${(f.totalSol||0).toFixed(2)}</td>
-                    <td class="py-2 text-right text-red-400">${(f.fee||0).toFixed(3)}</td>
-                    <td class="py-2 text-right text-orange-300">${(f.upkeep||0).toFixed(3)}</td>
-                    <td class="py-2 text-right text-blue-300">${f.users||0}</td>
-                    <td class="py-2 text-right text-green-400 font-bold">${(f.payout||0).toFixed(2)}</td>
-                    <td class="py-2 text-right text-xs">
-                        <div class="${vDiffColor}">${vDiffSign}${vDiff.toFixed(2)}</div>
-                        <div class="text-gray-600">${vStart.toFixed(1)} -> ${vEnd.toFixed(1)}</div>
-                    </td>
-                </tr>
-            `;
-        }).join('');
-    }
-
-    function filterHistory() {
-        const term = document.getElementById('history-search').value.toLowerCase();
-        const filtered = allFramesData.filter(f => 
-            f.id.toString().includes(term) || 
-            f.result.toLowerCase().includes(term)
-        );
-        renderFullHistory(filtered);
+    function formatLotteryCountdown(ms) {
+        if (ms <= 0) return "NOW";
+        const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+        const hours = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+        const mins = Math.floor((ms % (60 * 60 * 1000)) / (60 * 1000));
+        if (days > 0) return `${days}d ${hours}h`;
+        if (hours > 0) return `${hours}h ${mins}m`;
+        return `${mins}m`;
     }
 
     async function poll() {
@@ -468,6 +423,20 @@
                 }).join('');
             }
 
+            // Update lottery UI
+            if (data.lottery) {
+                ui.lotteryRound.innerText = '#' + (data.lottery.currentRound || '--');
+                ui.lotteryCountdown.innerText = formatLotteryCountdown(data.lottery.msUntilDraw || 0);
+
+                if (data.lottery.recentWinner) {
+                    ui.lotteryWinner.innerText = data.lottery.recentWinner.slice(0, 8) + '...';
+                    ui.lotteryPrize.innerText = (data.lottery.recentPrize || 0).toLocaleString() + ' ASDF';
+                } else {
+                    ui.lotteryWinner.innerText = 'No draws yet';
+                    ui.lotteryPrize.innerText = '-- ASDF';
+                }
+            }
+
         } catch (e) {
             ui.statusDot.classList.remove('bg-green-500', 'blink');
             ui.statusDot.classList.add('bg-red-500');
@@ -487,11 +456,151 @@
         }
     });
 
+    // --- MISSING FUNCTIONS ---
+    async function fetchLogs() {
+        try {
+            const pwd = cachedAdminPassword;
+            if (!pwd) return;
+            const res = await fetch(`${API_URL}/admin/logs`, {
+                headers: { 'x-admin-secret': pwd }
+            });
+            const data = await res.json();
+            if (data.error) return;
+            if (data.logs && Array.isArray(data.logs)) {
+                ui.logsContainer.innerHTML = data.logs.slice(-100).map(log => {
+                    const time = new Date(log.timestamp || Date.now()).toLocaleTimeString();
+                    return `<div>[${time}] ${log.level || 'INFO'}: ${log.message}</div>`;
+                }).join('');
+                if (isLogAutoScroll) {
+                    ui.logsContainer.scrollTop = ui.logsContainer.scrollHeight;
+                }
+            }
+        } catch (e) {
+            console.error('fetchLogs error:', e);
+        }
+    }
+
+    async function fetchPayouts() {
+        try {
+            const pwd = cachedAdminPassword;
+            if (!pwd) return;
+            const res = await fetch(`${API_URL}/admin/payouts`, {
+                headers: { 'x-admin-secret': pwd }
+            });
+            const data = await res.json();
+            if (data.error) return;
+
+            // Update queue
+            if (data.queue && Array.isArray(data.queue)) {
+                ui.queueCount.innerText = `${data.queue.length} Batches`;
+                if (data.queue.length === 0) {
+                    ui.queueRows.innerHTML = '<tr><td colspan="3" class="py-2 text-center italic opacity-50">Queue Empty</td></tr>';
+                } else {
+                    ui.queueRows.innerHTML = data.queue.map(item =>
+                        `<tr><td class="py-1">${item.type || 'PAYOUT'}</td><td class="py-1">${item.recipients || item.count || 0}</td><td class="py-1">${item.retries || 0}</td></tr>`
+                    ).join('');
+                }
+            }
+
+            // Update history
+            if (data.history && Array.isArray(data.history)) {
+                if (data.history.length === 0) {
+                    ui.payoutHistoryRows.innerHTML = '<tr><td colspan="4" class="py-2 text-center italic opacity-50">No History</td></tr>';
+                } else {
+                    ui.payoutHistoryRows.innerHTML = data.history.slice(0, 20).map(p => {
+                        const time = new Date(p.timestamp || p.time).toLocaleTimeString();
+                        const txShort = p.signature ? p.signature.slice(0, 8) + '...' : '--';
+                        return `<tr><td class="py-1">${time}</td><td class="py-1">${p.type || 'WIN'}</td><td class="py-1">${(p.amount || 0).toFixed(4)}</td><td class="py-1"><a href="https://solscan.io/tx/${p.signature}" target="_blank" class="text-blue-400 hover:underline">${txShort}</a></td></tr>`;
+                    }).join('');
+                }
+            }
+        } catch (e) {
+            console.error('fetchPayouts error:', e);
+        }
+    }
+
+    async function openFullHistory() {
+        document.getElementById('full-history-modal').classList.remove('hidden');
+        try {
+            const pwd = cachedAdminPassword || prompt("ENTER ADMIN PASSWORD:");
+            if (!pwd) return;
+            cachedAdminPassword = pwd;
+
+            const res = await fetch(`${API_URL}/admin/full-history`, {
+                headers: { 'x-admin-secret': pwd }
+            });
+            const data = await res.json();
+            if (data.error) {
+                alert('Error: ' + data.error);
+                cachedAdminPassword = null;
+                return;
+            }
+
+            allFramesData = data.history || data || [];
+            renderFullHistory(allFramesData);
+        } catch (e) {
+            console.error('openFullHistory error:', e);
+        }
+    }
+
+    function renderFullHistory(frames) {
+        const rows = document.getElementById('full-history-rows');
+        if (!frames || frames.length === 0) {
+            rows.innerHTML = '<tr><td colspan="10" class="py-4 text-center italic opacity-50">No history available</td></tr>';
+            return;
+        }
+        rows.innerHTML = frames.map(f => {
+            const time = new Date(f.endTime || f.time).toLocaleString();
+            let resColor = f.result === 'UP' ? 'text-green-400' : (f.result === 'DOWN' ? 'text-red-400' : 'text-gray-400');
+            const vaultDelta = ((f.fee || 0) + (f.upkeep || 0)).toFixed(4);
+            return `<tr class="hover:bg-white/5">
+                <td class="py-2 pl-2">${time}</td>
+                <td class="py-2 ${resColor}">${f.result || '--'}</td>
+                <td class="py-2 text-right">$${(f.open || 0).toFixed(2)}</td>
+                <td class="py-2 text-right">$${(f.close || 0).toFixed(2)}</td>
+                <td class="py-2 text-right">${(f.totalSol || 0).toFixed(2)}</td>
+                <td class="py-2 text-right">${(f.fee || 0).toFixed(4)}</td>
+                <td class="py-2 text-right">${(f.upkeep || 0).toFixed(4)}</td>
+                <td class="py-2 text-right">${f.users || 0}</td>
+                <td class="py-2 text-right">${(f.payout || 0).toFixed(2)}</td>
+                <td class="py-2 text-right text-yellow-400">${vaultDelta}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    function filterHistory() {
+        const search = document.getElementById('history-search').value.toLowerCase();
+        if (!search) {
+            renderFullHistory(allFramesData);
+            return;
+        }
+        const filtered = allFramesData.filter(f => {
+            const id = String(f.id || f.startTime || '').toLowerCase();
+            const result = (f.result || '').toLowerCase();
+            return id.includes(search) || result.includes(search);
+        });
+        renderFullHistory(filtered);
+    }
+
     window.onload = () => {
-        fetchLogs();
-        fetchPayouts();
+        // Prompt for admin password on load
+        cachedAdminPassword = prompt("ENTER ADMIN PASSWORD (for logs/payouts):");
+
+        poll(); // Start public data polling immediately
         setInterval(poll, 2000);
-        setInterval(fetchLogs, 2000); 
-        setInterval(fetchPayouts, 3000); 
+
+        if (cachedAdminPassword) {
+            fetchLogs();
+            fetchPayouts();
+            setInterval(fetchLogs, 5000);
+            setInterval(fetchPayouts, 5000);
+        }
+
+        // ESCAPE KEY TO CLOSE MODAL
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.getElementById('full-history-modal')?.classList.add('hidden');
+            }
+        });
     };
 </script>

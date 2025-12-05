@@ -136,7 +136,12 @@
 </div>
 
 <script>
-    const API_URL = 'https://asdforecast.onrender.com/api';
+    const IS_LOCAL = ['localhost', '127.0.0.1'].includes(window.location.hostname) || window.location.hostname.includes('github.dev');
+    const API_URL = IS_LOCAL
+        ? (window.location.hostname.includes('github.dev')
+            ? window.location.origin.replace('-8080.', '-3000.') + '/api'
+            : 'http://localhost:3000/api')
+        : 'https://asdforecast.onrender.com/api';
     
     let state = { prices: { up: 0.05, down: 0.05 }, targetEndTime: null, isResetting: false };
     let ui = {};

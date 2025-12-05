@@ -1,52 +1,244 @@
+require('dotenv').config({ override: true });
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const cors = require('cors');
+const crypto = require('crypto');
+const config = require('./config');
 const { Connection, PublicKey, Keypair, Transaction, SystemProgram, sendAndConfirmTransaction, ComputeBudgetProgram } = require('@solana/web3.js');
+const { getOrCreateAssociatedTokenAccount, createTransferInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const axios = require('axios');
-const fs = require('fs').promises; 
-const fsSync = require('fs');      
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const { Mutex } = require('async-mutex');
 const rateLimit = require('express-rate-limit'); 
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
 const stateMutex = new Mutex();
 const payoutMutex = new Mutex();
+const lotteryMutex = new Mutex();
+
+// --- WEBSOCKET CLIENT TRACKING ---
+const wsClients = new Map(); // ws -> { pubKey, connectedAt, lastPong, priceAlerts }
+let wsClientCount = 0;
+
+wss.on('connection', (ws, req) => {
+    const clientId = ++wsClientCount;
+    wsClients.set(ws, {
+        id: clientId,
+        pubKey: null,
+        connectedAt: Date.now(),
+        lastPong: Date.now(),
+        priceAlerts: []  // [{ id, targetPrice, direction: 'above'|'below', triggered: false }]
+    });
+    console.log(`> [WS] Client ${clientId} connected (total: ${wsClients.size})`);
+
+    // Handle client messages
+    ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'AUTH' && msg.pubKey) {
+                const client = wsClients.get(ws);
+                if (client) {
+                    client.pubKey = msg.pubKey;
+                    console.log(`> [WS] Client ${client.id} authenticated: ${msg.pubKey.slice(0,8)}...`);
+                }
+            } else if (msg.type === 'PING') {
+                ws.send(JSON.stringify({ event: 'PONG', ts: Date.now() }));
+            } else if (msg.type === 'SET_PRICE_ALERT') {
+                // Set a price alert: { type: 'SET_PRICE_ALERT', targetPrice: 150.00, direction: 'above'|'below' }
+                const client = wsClients.get(ws);
+                if (client && msg.targetPrice && msg.direction) {
+                    const alertId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+                    // Limit to 5 alerts per client
+                    if (client.priceAlerts.length >= 5) {
+                        ws.send(JSON.stringify({ event: 'PRICE_ALERT_ERROR', data: { error: 'MAX_ALERTS_REACHED', max: 5 }, ts: Date.now() }));
+                    } else {
+                        client.priceAlerts.push({
+                            id: alertId,
+                            targetPrice: parseFloat(msg.targetPrice),
+                            direction: msg.direction === 'below' ? 'below' : 'above',
+                            triggered: false,
+                            createdAt: Date.now()
+                        });
+                        ws.send(JSON.stringify({
+                            event: 'PRICE_ALERT_SET',
+                            data: { id: alertId, targetPrice: msg.targetPrice, direction: msg.direction },
+                            ts: Date.now()
+                        }));
+                    }
+                }
+            } else if (msg.type === 'REMOVE_PRICE_ALERT') {
+                // Remove alert: { type: 'REMOVE_PRICE_ALERT', id: 'abc123' }
+                const client = wsClients.get(ws);
+                if (client && msg.id) {
+                    client.priceAlerts = client.priceAlerts.filter(a => a.id !== msg.id);
+                    ws.send(JSON.stringify({ event: 'PRICE_ALERT_REMOVED', data: { id: msg.id }, ts: Date.now() }));
+                }
+            } else if (msg.type === 'LIST_PRICE_ALERTS') {
+                // List all active alerts
+                const client = wsClients.get(ws);
+                if (client) {
+                    ws.send(JSON.stringify({
+                        event: 'PRICE_ALERTS_LIST',
+                        data: { alerts: client.priceAlerts.filter(a => !a.triggered) },
+                        ts: Date.now()
+                    }));
+                }
+            }
+        } catch (e) { /* ignore invalid messages */ }
+    });
+
+    ws.on('pong', () => {
+        const client = wsClients.get(ws);
+        if (client) client.lastPong = Date.now();
+    });
+
+    ws.on('close', () => {
+        const client = wsClients.get(ws);
+        if (client) {
+            console.log(`> [WS] Client ${client.id} disconnected (total: ${wsClients.size - 1})`);
+        }
+        wsClients.delete(ws);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`> [WS] Client error:`, err.message);
+    });
+
+    // Send initial state
+    if (typeof cachedPublicState !== 'undefined' && cachedPublicState) {
+        ws.send(JSON.stringify({ event: 'STATE', data: cachedPublicState, ts: Date.now() }));
+    }
+});
+
+// Heartbeat interval - ping clients every 30s, close if no pong in 60s
+setInterval(() => {
+    const now = Date.now();
+    for (const [ws, client] of wsClients) {
+        if (now - client.lastPong > 60000) {
+            console.log(`> [WS] Client ${client.id} timed out, closing`);
+            ws.terminate();
+        } else if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+        }
+    }
+}, config.WEBSOCKET.HEARTBEAT_INTERVAL);
+
+// Broadcast function - sends to all connected clients
+function wsBroadcast(event, data, filterFn = null) {
+    if (wsClients.size === 0) return;
+    const message = JSON.stringify({ event, data, ts: Date.now() });
+    for (const [ws, client] of wsClients) {
+        if (ws.readyState === WebSocket.OPEN) {
+            if (!filterFn || filterFn(client)) {
+                ws.send(message);
+            }
+        }
+    }
+}
+
+// Broadcast to specific user by pubKey
+function wsBroadcastToUser(pubKey, event, data) {
+    wsBroadcast(event, data, (client) => client.pubKey === pubKey);
+}
+
+// Check price alerts for all connected clients
+function checkPriceAlerts(currentPrice) {
+    for (const [ws, client] of wsClients) {
+        if (!client.priceAlerts || client.priceAlerts.length === 0) continue;
+        if (ws.readyState !== WebSocket.OPEN) continue;
+
+        for (const alert of client.priceAlerts) {
+            if (alert.triggered) continue;
+
+            let triggered = false;
+            if (alert.direction === 'above' && currentPrice >= alert.targetPrice) {
+                triggered = true;
+            } else if (alert.direction === 'below' && currentPrice <= alert.targetPrice) {
+                triggered = true;
+            }
+
+            if (triggered) {
+                alert.triggered = true;
+                ws.send(JSON.stringify({
+                    event: 'PRICE_ALERT_TRIGGERED',
+                    data: {
+                        id: alert.id,
+                        targetPrice: alert.targetPrice,
+                        direction: alert.direction,
+                        currentPrice: currentPrice,
+                        message: `SOL price ${alert.direction === 'above' ? 'reached' : 'dropped to'} $${currentPrice.toFixed(2)}`
+                    },
+                    ts: Date.now()
+                }));
+            }
+        }
+
+        // Clean up triggered alerts
+        client.priceAlerts = client.priceAlerts.filter(a => !a.triggered);
+    }
+}
 
 app.set('trust proxy', 1);
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
+app.use(express.static(__dirname));
+
+// Serve frontend
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'frontend.html')));
+app.get('/control', (req, res) => res.sendFile(path.join(__dirname, 'control_panel.html')));
+app.get('/status', (req, res) => res.sendFile(path.join(__dirname, 'status_monitor_widget.html')));
 
 const PORT = process.env.PORT || 3000;
 
-// --- CONFIGURATION ---
+// --- CONFIGURATION (from config.js) ---
 const SOLANA_NETWORK = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-const FEE_WALLET = new PublicKey("5xfyqaDzaj1XNvyz3gnuRJMSNUzGkkMbYbh2bKzWxuan");
-const UPKEEP_WALLET = new PublicKey("BH8aAiEDgZGJo6pjh32d5b6KyrNt6zA9U8WTLZShmVXq");
-const PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest";
-const SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || ""; 
+const FEE_WALLET = new PublicKey(config.FEE_WALLET);
+const UPKEEP_WALLET = new PublicKey(config.UPKEEP_WALLET);
+const PYTH_HERMES_URL = config.PYTH_HERMES_URL;
+const SOL_FEED_ID = config.SOL_FEED_ID;
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || "";
 
-const ASDF_MINT = "9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump";
-const PRICE_SCALE = 0.1;
-const PAYOUT_MULTIPLIER = 0.94;
-const FEE_PERCENT = 0.0552; 
-const UPKEEP_PERCENT = 0.0048; 
-const FRAME_DURATION = 15 * 60 * 1000; 
-const BACKEND_VERSION = "146.0"; // UPDATE: Merged External Tracking Logic
-const PRIORITY_FEE_UNITS = 50000; 
+const ASDF_MINT = config.ASDF_MINT;
+const PUMPSWAP_POOL = config.PUMPSWAP_POOL;
 
-// --- EXTERNAL TRACKER CONFIG ---
-const TOKEN_TOTAL_SUPPLY = 1_000_000_000;
-const TRACKED_WALLET = "vcGYZbvDid6cRUkCCqcWpBxow73TLpmY6ipmDUtrTF8"; // CTO Wallet
-const PURCHASE_SOURCE_ADDRESS = "DuhRX5JTPtsWU5n44t8tcFEfmzy2Eu27p4y6z8Rhf2bb";
-const HELIUS_RPC_URL = SOLANA_NETWORK; // Re-use existing
-const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
-const JUP_PRICE_URL = "https://lite-api.jup.ag/price/v3";
+// --- STARTUP VALIDATION ---
+if (!process.env.HELIUS_API_KEY) {
+    console.error("❌ FATAL: HELIUS_API_KEY not found in environment");
+    process.exit(1);
+}
+console.log(`✓ HELIUS_API_KEY loaded (${process.env.HELIUS_API_KEY.slice(0,8)}...)`);
+
+// --- GAME ECONOMY (from config.js) ---
+const PRICE_SCALE = config.PRICE_SCALE;
+const PAYOUT_MULTIPLIER = config.PAYOUT_MULTIPLIER;
+const FEE_PERCENT = config.FEE_PERCENT;
+const UPKEEP_PERCENT = config.UPKEEP_PERCENT;
+const FRAME_DURATION = config.FRAME_DURATION_MS;
+const BACKEND_VERSION = config.BACKEND_VERSION;
+const PRIORITY_FEE_UNITS = config.PRIORITY_FEE_UNITS;
+
+// --- LOTTERY & REFERRAL CONFIG (from config.js) ---
+const LOTTERY_CONFIG = config.LOTTERY_CONFIG;
+const REFERRAL_CONFIG = config.REFERRAL_CONFIG;
+
+// --- EXTERNAL TRACKER CONFIG (from config.js) ---
+const TOKEN_TOTAL_SUPPLY = config.TOKEN_TOTAL_SUPPLY;
+const TRACKED_WALLET = config.TRACKED_WALLET;
+const PURCHASE_SOURCE_ADDRESS = config.PURCHASE_SOURCE_ADDRESS;
+const HELIUS_RPC_URL = SOLANA_NETWORK;
+const HELIUS_ENHANCED_BASE = config.HELIUS_ENHANCED_BASE;
+const JUP_PRICE_URL = config.JUP_PRICE_URL;
 const JUPITER_API_KEY = process.env.JUPITER_API_KEY || "";
 
 // --- LOGGING ---
 const serverLogs = [];
-const MAX_LOGS = 100;
+const MAX_LOGS = config.MAX_LOGS;
 function log(message, type = "INFO") {
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] [${type}] ${message}`;
@@ -61,19 +253,46 @@ const SIGNATURE_REGEX = /^[1-9A-HJ-NP-Za-km-z]{80,100}$/;
 function isValidSolanaAddress(address) { return typeof address === 'string' && SOLANA_ADDRESS_REGEX.test(address); }
 function isValidSignature(signature) { return typeof signature === 'string' && SIGNATURE_REGEX.test(signature); }
 
-// --- RATE LIMIT ---
-const betLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 10, message: { error: "RATE_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
-const stateLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 120, message: { error: "POLLING_LIMIT_EXCEEDED" }, standardHeaders: true, legacyHeaders: false });
-const voteLimiter = rateLimit({ 
-    windowMs: 3600 * 1000, // 1 hour
-    max: 1, 
-    message: { error: "IP_COOLDOWN_ACTIVE" }, 
-    standardHeaders: true, 
-    legacyHeaders: false 
+// --- RATE LIMIT (from config.js) ---
+// Headers: RateLimit-* (standard) + X-RateLimit-* (legacy) for broad compatibility
+const betLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.BET.windowMs,
+    max: config.RATE_LIMITS.BET.max,
+    message: { error: "RATE_LIMIT_EXCEEDED", retryAfter: Math.ceil(config.RATE_LIMITS.BET.windowMs / 1000) },
+    standardHeaders: true,
+    legacyHeaders: true  // X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+});
+const stateLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.STATE.windowMs,
+    max: config.RATE_LIMITS.STATE.max,
+    message: { error: "POLLING_LIMIT_EXCEEDED", retryAfter: Math.ceil(config.RATE_LIMITS.STATE.windowMs / 1000) },
+    standardHeaders: true,
+    legacyHeaders: true
+});
+const voteLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.VOTE.windowMs,
+    max: config.RATE_LIMITS.VOTE.max,
+    message: { error: "IP_COOLDOWN_ACTIVE", retryAfter: Math.ceil(config.RATE_LIMITS.VOTE.windowMs / 1000) },
+    standardHeaders: true,
+    legacyHeaders: true
+});
+const claimLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.CLAIM.windowMs,
+    max: config.RATE_LIMITS.CLAIM.max,
+    message: { error: "CLAIM_RATE_LIMIT", retryAfter: Math.ceil(config.RATE_LIMITS.CLAIM.windowMs / 1000) },
+    standardHeaders: true,
+    legacyHeaders: true
+});
+const registerLimiter = rateLimit({
+    windowMs: config.RATE_LIMITS.REGISTER.windowMs,
+    max: config.RATE_LIMITS.REGISTER.max,
+    message: { error: "REGISTER_RATE_LIMIT", retryAfter: Math.ceil(config.RATE_LIMITS.REGISTER.windowMs / 1000) },
+    standardHeaders: true,
+    legacyHeaders: true
 });
 
 // --- PERSISTENCE ---
-const RENDER_DISK_PATH = '/var/data';
+const RENDER_DISK_PATH = config.RENDER_DISK_PATH;
 const DATA_DIR = fsSync.existsSync(RENDER_DISK_PATH) ? RENDER_DISK_PATH : path.join(__dirname, 'data');
 const FRAMES_DIR = path.join(DATA_DIR, 'frames');
 const USERS_DIR = path.join(DATA_DIR, 'users');
@@ -85,13 +304,16 @@ if (!fsSync.existsSync(USERS_DIR)) fsSync.mkdirSync(USERS_DIR);
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const STATS_FILE = path.join(DATA_DIR, 'global_stats.json');
-const SIGS_FILE = path.join(DATA_DIR, 'signatures.log'); 
-const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json'); 
+const SIGS_FILE = path.join(DATA_DIR, 'signatures.log');
+const QUEUE_FILE = path.join(DATA_DIR, 'payout_queue.json');
+const LOTTERY_STATE_FILE = path.join(DATA_DIR, 'lottery_state.json');
+const LOTTERY_HISTORY_FILE = path.join(DATA_DIR, 'lottery_history.json');
 const PAYOUT_HISTORY_FILE = path.join(DATA_DIR, 'payout_history.json');
 const PAYOUT_MASTER_LOG = path.join(DATA_DIR, 'payout_master.log');
 const FAILED_REFUNDS_FILE = path.join(DATA_DIR, 'failed_refunds.json');
 const SENTIMENT_VOTES_FILE = path.join(DATA_DIR, 'sentiment_votes.json');
-// NEW: Historical Price Cache
+const REFERRAL_FILE = path.join(DATA_DIR, 'referrals.json');
+// Historical Price Cache
 const HISTORICAL_SOL_PRICE_FILE = path.join(DATA_DIR, 'historical_sol_prices.json');
 const HISTORICAL_CACHE_DURATION_MS = 6 * 60 * 60 * 1000;
 
@@ -150,12 +372,35 @@ let historySummary = [];
 let globalStats = { totalVolume: 0, totalFees: 0, totalASDF: 0, totalWinnings: 0, totalLifetimeUsers: 0, lastASDFSignature: null };
 let processedSignatures = new Set(); 
 let globalLeaderboard = [];
-let knownUsers = new Set(); 
-let currentQueueLength = 0; 
-let payoutHistory = [];
+let knownUsers = new Set();
+let currentQueueLength = 0;
+
+// --- LOTTERY STATE ---
+let lotteryState = {
+    currentRound: 1,
+    roundStartTime: Date.now(),
+    lastDrawTime: null,
+    nextDrawTime: Date.now() + LOTTERY_CONFIG.DRAW_INTERVAL_MS
+    // Prize pool is calculated dynamically: totalASDF × 55.2%
+    // This makes it transparent and verifiable on-chain
+};
+let lotteryHistory = { draws: [] };
+let cachedCirculatingSupply = { value: 0, timestamp: 0 };
+
+// --- REFERRAL STATE (552 SYMMETRY - Gambler-Holder Alignment) ---
+let referralData = {
+    links: {},           // referrerPubKey -> { code, referredUsers[], totalVolumeGenerated, createdAt }
+    codeToReferrer: {},  // code -> referrerPubKey
+    userToReferrer: {},  // userPubKey -> referrerPubKey (who referred this user)
+    // Pending rewards in SOL value (converted to ASDF at claim time via live price)
+    pendingRewards: {}   // userPubKey -> { asReferrer: SOL, asUser: SOL, totalClaimedASDF: 0 }
+};
+
+// --- STATE CACHING (NEW) ---
 let cachedPublicState = null;
-let sentimentVotes = new Map(); 
-let isProcessingQueue = false; 
+let sentimentVotes = new Map();
+let isProcessingQueue = false;
+let payoutHistory = []; 
 
 // NEW: External Stats Cache
 let externalStatsCache = {
@@ -212,6 +457,18 @@ async function loadAndInit() {
     
     // START EXTERNAL TRACKER LOOPS
     startExternalTrackerService();
+
+    // Validate PumpSwap pool is accessible
+    try {
+        const testPrice = await getASDF_PriceFromPool();
+        if (testPrice.priceInSol > 0) {
+            log(`✓ PumpSwap pool validated: ${testPrice.priceInSol.toFixed(12)} SOL/ASDF`, "SYS");
+        } else {
+            log("⚠ PumpSwap pool returned zero price - check pool addresses", "WARN");
+        }
+    } catch (e) {
+        log(`⚠ PumpSwap pool validation failed: ${e.message}`, "ERR");
+    }
 
     isInitialized = true; 
     updatePublicStateCache(); 
@@ -302,6 +559,834 @@ async function saveUser(pubKey, data) {
         await atomicWrite(file, data);
     } catch (e) {}
 }
+
+// Record daily activity for lottery eligibility multiplier
+async function recordUserActivity(pubKey) {
+    if (!isValidSolanaAddress(pubKey)) return;
+
+    const userData = await getUser(pubKey);
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+
+    // Initialize lottery object if not present
+    if (!userData.lottery) {
+        userData.lottery = {
+            activityDays: [],
+            firstSeenHolding: null,
+            wins: [],
+            participatedRounds: []
+        };
+    }
+
+    // Initialize activityDays if not present
+    if (!userData.lottery.activityDays) {
+        userData.lottery.activityDays = [];
+    }
+
+    // Add today if not already recorded
+    if (!userData.lottery.activityDays.includes(today)) {
+        userData.lottery.activityDays.push(today);
+    }
+
+    // Keep only the last 7 days (cleanup old entries)
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - LOTTERY_CONFIG.ACTIVITY_WINDOW_DAYS);
+    userData.lottery.activityDays = userData.lottery.activityDays.filter(day => {
+        return new Date(day) >= cutoffDate;
+    });
+
+    await saveUser(pubKey, userData);
+}
+
+// Calculate activity multiplier (0 to 1 based on active days in last 7 days)
+function calculateActivityMultiplier(activityDays) {
+    if (!activityDays || activityDays.length === 0) return 0;
+
+    const now = new Date();
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - LOTTERY_CONFIG.ACTIVITY_WINDOW_DAYS);
+
+    // Count unique days active in the window
+    const recentDays = activityDays.filter(day => new Date(day) >= cutoffDate);
+    const uniqueDays = [...new Set(recentDays)].length;
+
+    return uniqueDays / LOTTERY_CONFIG.ACTIVITY_WINDOW_DAYS; // 0 to 1
+}
+
+// --- LOTTERY PERSISTENCE ---
+function loadLotteryState() {
+    try {
+        if (fsSync.existsSync(LOTTERY_STATE_FILE)) {
+            const loadedState = JSON.parse(fsSync.readFileSync(LOTTERY_STATE_FILE));
+            lotteryState = { ...lotteryState, ...loadedState };
+            // Prize pool is calculated dynamically: totalASDF × 55.2%
+            const dynamicPool = Math.floor(globalStats.totalASDF * LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT);
+            console.log(`> [LOTTERY] State loaded. Round ${lotteryState.currentRound}, Dynamic Pool: ${dynamicPool.toLocaleString()} ASDF (55.2% of ${Math.floor(globalStats.totalASDF).toLocaleString()})`);
+        }
+        if (fsSync.existsSync(LOTTERY_HISTORY_FILE)) {
+            lotteryHistory = JSON.parse(fsSync.readFileSync(LOTTERY_HISTORY_FILE));
+            console.log(`> [LOTTERY] History loaded. ${lotteryHistory.draws.length} past draws.`);
+        }
+    } catch (e) {
+        console.error("> [LOTTERY] Load Error:", e.message);
+    }
+}
+
+async function saveLotteryState() {
+    await atomicWrite(LOTTERY_STATE_FILE, lotteryState);
+}
+
+async function saveLotteryHistory() {
+    await atomicWrite(LOTTERY_HISTORY_FILE, lotteryHistory);
+}
+
+// --- REFERRAL PERSISTENCE (552 SYMMETRY) ---
+function loadReferralData() {
+    try {
+        if (fsSync.existsSync(REFERRAL_FILE)) {
+            referralData = JSON.parse(fsSync.readFileSync(REFERRAL_FILE));
+            const totalReferrers = Object.keys(referralData.links).length;
+            const totalReferred = Object.keys(referralData.userToReferrer).length;
+            console.log(`> [REFERRAL] Loaded. ${totalReferrers} referrers, ${totalReferred} referred users.`);
+        }
+    } catch (e) {
+        console.error("> [REFERRAL] Load Error:", e.message);
+    }
+}
+
+async function saveReferralData() {
+    await atomicWrite(REFERRAL_FILE, referralData);
+}
+
+// Generate unique referral code
+function generateReferralCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed ambiguous chars (0, O, I, 1)
+    let code;
+    do {
+        code = '';
+        for (let i = 0; i < REFERRAL_CONFIG.CODE_LENGTH; i++) {
+            code += chars.charAt(crypto.randomInt(0, chars.length));
+        }
+    } while (referralData.codeToReferrer[code]); // Ensure unique
+    return code;
+}
+
+// Get or create referral code for a user
+async function getOrCreateReferralCode(userPubKey) {
+    // Check if user already has a referral link
+    if (referralData.links[userPubKey]) {
+        return referralData.links[userPubKey].code;
+    }
+
+    // Check ASDF balance requirement
+    const balance = await getUserASDFBalance(userPubKey);
+    if (balance < REFERRAL_CONFIG.MIN_ASDF_TO_REFER) {
+        return null; // Not enough ASDF to refer
+    }
+
+    // Create new referral link
+    const code = generateReferralCode();
+    referralData.links[userPubKey] = {
+        code: code,
+        referredUsers: [],
+        totalFeesGenerated: 0,
+        totalRewardsEarned: 0,
+        createdAt: Date.now()
+    };
+    referralData.codeToReferrer[code] = userPubKey;
+    await saveReferralData();
+
+    console.log(`> [REFERRAL] New code created: ${code} for ${userPubKey.slice(0, 8)}...`);
+    return code;
+}
+
+// Register a user with a referral code
+async function registerReferral(newUserPubKey, referralCode) {
+    // Validate code exists
+    const referrerPubKey = referralData.codeToReferrer[referralCode.toUpperCase()];
+    if (!referrerPubKey) {
+        return { success: false, error: 'INVALID_CODE' };
+    }
+
+    // Can't refer yourself
+    if (referrerPubKey === newUserPubKey) {
+        return { success: false, error: 'SELF_REFERRAL' };
+    }
+
+    // Check if user is already referred
+    if (referralData.userToReferrer[newUserPubKey]) {
+        return { success: false, error: 'ALREADY_REFERRED' };
+    }
+
+    // Check max referrals limit
+    const referrerLink = referralData.links[referrerPubKey];
+    if (referrerLink.referredUsers.length >= REFERRAL_CONFIG.MAX_REFERRALS_PER_USER) {
+        return { success: false, error: 'REFERRER_MAX_REACHED' };
+    }
+
+    // Register the referral
+    referralData.userToReferrer[newUserPubKey] = referrerPubKey;
+    referrerLink.referredUsers.push(newUserPubKey);
+    await saveReferralData();
+
+    // Update new user's data with referral info
+    const userData = await getUser(newUserPubKey);
+    userData.referredBy = referrerPubKey;
+    userData.referredAt = Date.now();
+    await saveUser(newUserPubKey, userData);
+
+    console.log(`> [REFERRAL] ${newUserPubKey.slice(0, 8)}... referred by ${referrerPubKey.slice(0, 8)}... (code: ${referralCode})`);
+    return { success: true, referrer: referrerPubKey };
+}
+
+// --- ASDF PRICE FETCHING (On-chain PumpSwap Pool) ---
+let cachedASDF_Price = { priceInSol: 0, priceInUsd: 0, timestamp: 0 };
+const ASDF_PRICE_CACHE_MS = 30 * 1000; // Cache price for 30 seconds (on-chain is fast)
+
+async function getASDF_PriceFromPool() {
+    const now = Date.now();
+    // Return cached price if still valid
+    if (cachedASDF_Price.priceInSol > 0 && (now - cachedASDF_Price.timestamp) < ASDF_PRICE_CACHE_MS) {
+        return cachedASDF_Price;
+    }
+
+    try {
+        const connection = new Connection(SOLANA_NETWORK);
+
+        // Fetch both token account balances in parallel
+        const [baseBalanceRes, quoteBalanceRes] = await Promise.all([
+            connection.getTokenAccountBalance(new PublicKey(PUMPSWAP_POOL.BASE_TOKEN_ACCOUNT)),
+            connection.getTokenAccountBalance(new PublicKey(PUMPSWAP_POOL.QUOTE_TOKEN_ACCOUNT))
+        ]);
+
+        const baseReserve = parseFloat(baseBalanceRes.value.uiAmountString || "0"); // ASDF
+        const quoteReserve = parseFloat(quoteBalanceRes.value.uiAmountString || "0"); // SOL
+
+        if (baseReserve > 0 && quoteReserve > 0) {
+            const priceInSol = quoteReserve / baseReserve;
+            // Convert to USD using current SOL price (with immediate CoinGecko fallback)
+            let solPriceUsd = gameState.price || externalStatsCache.wallet.solPriceUsd || 0;
+            if (solPriceUsd === 0) {
+                try {
+                    const res = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&x_cg_demo_api_key=${COINGECKO_API_KEY}`, { timeout: 3000 });
+                    solPriceUsd = res.data?.solana?.usd || 0;
+                } catch (e) { /* ignore, USD will be 0 */ }
+            }
+            const priceInUsd = priceInSol * solPriceUsd;
+
+            cachedASDF_Price = {
+                priceInSol,
+                priceInUsd,
+                baseReserve,
+                quoteReserve,
+                timestamp: now
+            };
+
+            console.log(`> [PRICE] ASDF on-chain: ${priceInSol.toFixed(12)} SOL ($${priceInUsd.toFixed(8)}) | Pool: ${baseReserve.toLocaleString()} ASDF / ${quoteReserve.toFixed(4)} SOL`);
+            return cachedASDF_Price;
+        }
+    } catch (e) {
+        console.error(`> [PRICE] On-chain fetch error: ${e.message}`);
+    }
+
+    // Fallback to cached or default
+    return cachedASDF_Price.priceInSol > 0 ? cachedASDF_Price : { priceInSol: 0.000001, priceInUsd: 0, timestamp: now };
+}
+
+// Wrapper for backward compatibility - returns price in SOL
+async function getASDF_Price() {
+    const priceData = await getASDF_PriceFromPool();
+    return priceData.priceInSol;
+}
+
+// Golden Ratio (φ) decay for referrer rewards - prevents farming, rewards organic growth
+// Rate decreases as referrer accumulates more referrals: 0.448% → 0.277% → 0.171% → ...
+function getReferrerRate(numReferrals) {
+    const PHI = config.PHI;
+    const baseRate = REFERRAL_CONFIG.BASE_REFERRER_RATE;
+    // Formula: baseRate / φ^floor(log_φ(n+1))
+    const exponent = Math.floor(Math.log(numReferrals + 1) / Math.log(PHI));
+    return baseRate / Math.pow(PHI, exponent);
+}
+
+// Calculate and accumulate referral rewards based on BET AMOUNT (not fees)
+// Rewards stored in SOL value, converted to ASDF at claim time
+async function processReferralRewards(userPubKey, betAmountSol) {
+    const referrerPubKey = referralData.userToReferrer[userPubKey];
+    if (!referrerPubKey || !referralData.links[referrerPubKey]) {
+        return { userRebate: 0, referrerReward: 0, referrerRate: 0 }; // No referrer for this user
+    }
+
+    // Get referrer's current referral count for dynamic rate
+    const referrerLink = referralData.links[referrerPubKey];
+    const numReferrals = referrerLink.referredUsers ? referrerLink.referredUsers.length : 0;
+
+    // Calculate rewards based on BET AMOUNT (552 SYMMETRY + Golden Ratio Decay)
+    // Filleul (active user) gets FIXED: 0.552%
+    // Parrain (referrer) gets DYNAMIC: 0.448% decaying with φ
+    const userRebate = betAmountSol * REFERRAL_CONFIG.USER_REBATE_PERCENT;
+    const referrerRate = getReferrerRate(numReferrals);
+    const referrerReward = betAmountSol * referrerRate;
+
+    // Initialize pending rewards if needed
+    if (!referralData.pendingRewards) referralData.pendingRewards = {};
+
+    if (!referralData.pendingRewards[userPubKey]) {
+        referralData.pendingRewards[userPubKey] = { asReferrer: 0, asUser: 0, totalClaimedASDF: 0 };
+    }
+    if (!referralData.pendingRewards[referrerPubKey]) {
+        referralData.pendingRewards[referrerPubKey] = { asReferrer: 0, asUser: 0, totalClaimedASDF: 0 };
+    }
+
+    // Accumulate rewards in SOL value (will convert to ASDF at claim)
+    referralData.pendingRewards[userPubKey].asUser += userRebate;
+    referralData.pendingRewards[referrerPubKey].asReferrer += referrerReward;
+
+    // Update referrer link stats
+    if (!referralData.links[referrerPubKey].totalVolumeGenerated) {
+        referralData.links[referrerPubKey].totalVolumeGenerated = 0;
+    }
+    referralData.links[referrerPubKey].totalVolumeGenerated += betAmountSol;
+
+    return { userRebate, referrerReward, referrerRate };
+}
+
+// --- LOTTERY ON-CHAIN QUERIES ---
+async function getCirculatingSupply() {
+    const now = Date.now();
+    // Return cached value if still valid
+    if (cachedCirculatingSupply.value > 0 && (now - cachedCirculatingSupply.timestamp) < LOTTERY_CONFIG.SUPPLY_CACHE_MS) {
+        return cachedCirculatingSupply.value;
+    }
+
+    try {
+        const connection = new Connection(SOLANA_NETWORK);
+        const mintPubKey = new PublicKey(ASDF_MINT);
+        const mintInfo = await connection.getParsedAccountInfo(mintPubKey);
+
+        if (mintInfo.value && mintInfo.value.data.parsed) {
+            const supply = mintInfo.value.data.parsed.info.supply;
+            const decimals = mintInfo.value.data.parsed.info.decimals;
+            const circulatingSupply = Number(supply) / Math.pow(10, decimals);
+
+            cachedCirculatingSupply = { value: circulatingSupply, timestamp: now };
+            console.log(`> [LOTTERY] Circulating supply: ${circulatingSupply.toLocaleString()} ASDF`);
+            return circulatingSupply;
+        }
+    } catch (e) {
+        console.error("> [LOTTERY] Supply query failed:", e.message);
+    }
+
+    // Fallback to cached value if query fails
+    return cachedCirculatingSupply.value || 1000000000; // Default 1B if no data
+}
+
+async function getUserASDFBalance(userPubKey) {
+    try {
+        const connection = new Connection(SOLANA_NETWORK);
+        const owner = new PublicKey(userPubKey);
+        const mintPubKey = new PublicKey(ASDF_MINT);
+
+        // Get token accounts for this owner
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(owner, { mint: mintPubKey });
+
+        let totalBalance = 0;
+        for (const account of tokenAccounts.value) {
+            const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
+            totalBalance += balance || 0;
+        }
+
+        return totalBalance;
+    } catch (e) {
+        console.error(`> [LOTTERY] Balance query failed for ${userPubKey}:`, e.message);
+        return 0;
+    }
+}
+
+// Transfer ASDF tokens from FEE_WALLET to a user (for referral claims)
+async function transferASDF(recipientPubKey, amount) {
+    if (!houseKeypair) {
+        throw new Error("House wallet not configured");
+    }
+
+    const connection = new Connection(SOLANA_NETWORK);
+    const mintPubKey = new PublicKey(ASDF_MINT);
+    const recipientPubKeyObj = new PublicKey(recipientPubKey);
+
+    try {
+        // Get or create the source token account (FEE_WALLET's ASDF account)
+        const sourceTokenAccount = await getOrCreateAssociatedTokenAccount(
+            connection,
+            houseKeypair,
+            mintPubKey,
+            houseKeypair.publicKey
+        );
+
+        // Get or create the destination token account (recipient's ASDF account)
+        const destinationTokenAccount = await getOrCreateAssociatedTokenAccount(
+            connection,
+            houseKeypair,  // Payer for account creation if needed
+            mintPubKey,
+            recipientPubKeyObj
+        );
+
+        // ASDF has 6 decimals
+        const ASDF_DECIMALS = 6;
+        const amountInSmallestUnit = Math.floor(amount * Math.pow(10, ASDF_DECIMALS));
+
+        // Create transfer instruction
+        const transferIx = createTransferInstruction(
+            sourceTokenAccount.address,
+            destinationTokenAccount.address,
+            houseKeypair.publicKey,
+            amountInSmallestUnit,
+            [],
+            TOKEN_PROGRAM_ID
+        );
+
+        // Add priority fee for faster confirmation
+        const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: PRIORITY_FEE_UNITS
+        });
+
+        // Build and send transaction
+        const transaction = new Transaction().add(priorityFeeIx, transferIx);
+        const signature = await sendAndConfirmTransaction(
+            connection,
+            transaction,
+            [houseKeypair],
+            { commitment: 'confirmed' }
+        );
+
+        console.log(`> [REFERRAL] ASDF Transfer: ${amount.toLocaleString()} ASDF to ${recipientPubKey.slice(0, 8)}... | Sig: ${signature.slice(0, 20)}...`);
+        return signature;
+    } catch (e) {
+        console.error(`> [REFERRAL] ASDF Transfer failed: ${e.message}`);
+        throw e;
+    }
+}
+
+async function checkLotteryEligibility(userPubKey) {
+    const supply = await getCirculatingSupply();
+    const threshold = supply * LOTTERY_CONFIG.ELIGIBILITY_PERCENT;
+    const balance = await getUserASDFBalance(userPubKey);
+
+    return {
+        isEligible: balance >= threshold,
+        balance: balance,
+        threshold: threshold,
+        supply: supply
+    };
+}
+
+// Get the timestamp of the first ASDF transaction for a wallet using Helius API
+// Uses getTransactionsForAddress with sortOrder: "asc" to get oldest first
+async function getFirstASDF_Transaction(walletAddress) {
+    try {
+        // Get user's ASDF token account
+        const connection = new Connection(SOLANA_NETWORK);
+        const walletPubKey = new PublicKey(walletAddress);
+        const mintPubKey = new PublicKey(ASDF_MINT);
+
+        // Find the associated token account for this wallet
+        const tokenAccounts = await connection.getTokenAccountsByOwner(walletPubKey, { mint: mintPubKey });
+
+        if (tokenAccounts.value.length === 0) {
+            return null; // No ASDF token account
+        }
+
+        const tokenAccountAddress = tokenAccounts.value[0].pubkey.toBase58();
+
+        // Use Helius getTransactionsForAddress with sortOrder: "asc" to get oldest first
+        const response = await axios.post(
+            `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+            {
+                jsonrpc: "2.0",
+                id: "get-first-tx",
+                method: "getTransactionsForAddress",
+                params: [
+                    tokenAccountAddress,
+                    {
+                        sortOrder: "asc",  // Oldest first
+                        limit: 1
+                    }
+                ]
+            },
+            { timeout: 15000 }
+        );
+
+        // Handle response structure: result.data[] for getTransactionsForAddress
+        const resultData = response.data?.result?.data || response.data?.result;
+
+        if (resultData && resultData.length > 0) {
+            const firstTx = resultData[0];
+
+            // blockTime can be in the transaction object directly or we need to get it from slot
+            if (firstTx.blockTime) {
+                const timestamp = firstTx.blockTime * 1000;
+                console.log(`> [LOTTERY] First ASDF tx for ${walletAddress.slice(0, 8)}...: ${new Date(timestamp).toISOString()}`);
+                return timestamp;
+            }
+
+            // If no blockTime, try to get block time from the slot
+            if (firstTx.slot) {
+                try {
+                    const blockTimeResponse = await axios.post(
+                        SOLANA_NETWORK,
+                        {
+                            jsonrpc: "2.0",
+                            id: "get-block-time",
+                            method: "getBlockTime",
+                            params: [firstTx.slot]
+                        },
+                        { timeout: 10000 }
+                    );
+
+                    if (blockTimeResponse.data?.result) {
+                        const timestamp = blockTimeResponse.data.result * 1000;
+                        console.log(`> [LOTTERY] First ASDF tx for ${walletAddress.slice(0, 8)}... (via slot): ${new Date(timestamp).toISOString()}`);
+                        return timestamp;
+                    }
+                } catch (slotErr) {
+                    console.error(`> [LOTTERY] Error getting block time for slot:`, slotErr.message);
+                }
+            }
+        }
+
+        return null;
+    } catch (e) {
+        console.error(`> [LOTTERY] Error getting first ASDF transaction:`, e.message);
+        return null;
+    }
+}
+
+function calculateTickets(user) {
+    if (!user.lottery || !user.lottery.isEligible) return { base: 0, effective: 0, multiplier: 0, activeDays: 0 };
+
+    // Use weeksHolding directly from user data (already calculated in updateUserLotteryStatus)
+    // This avoids the fallback Date.now() issue
+    const weeksHeld = user.lottery.weeksHolding || 0;
+
+    const baseTickets = Math.min(1 + weeksHeld, LOTTERY_CONFIG.MAX_TICKETS);
+    const activityDays = user.lottery.activityDays || [];
+    const activityMultiplier = calculateActivityMultiplier(activityDays);
+    const effectiveTickets = activityMultiplier > 0 ? Math.max(1, Math.round(baseTickets * activityMultiplier)) : 0;
+
+    return {
+        base: baseTickets,
+        effective: effectiveTickets,
+        multiplier: activityMultiplier,
+        activeDays: activityDays.length
+    };
+}
+
+async function updateUserLotteryStatus(userPubKey) {
+    const userData = await getUser(userPubKey);
+    const eligibility = await checkLotteryEligibility(userPubKey);
+
+    if (!userData.lottery) {
+        userData.lottery = {
+            firstSeenHolding: null,
+            firstSeenHoldingSource: null, // 'onchain' or 'cached'
+            lastBalanceCheck: Date.now(),
+            currentBalance: eligibility.balance,
+            weeksHolding: 0,
+            isEligible: eligibility.isEligible,
+            wins: [],
+            participatedRounds: []
+        };
+    }
+
+    // Update balance and eligibility
+    userData.lottery.currentBalance = eligibility.balance;
+    userData.lottery.lastBalanceCheck = Date.now();
+    userData.lottery.isEligible = eligibility.isEligible;
+
+    // Fetch on-chain first transaction if we don't have it cached
+    // Only fetch once, then cache the result
+    if (!userData.lottery.firstSeenHolding || userData.lottery.firstSeenHoldingSource !== 'onchain') {
+        const onchainFirstTx = await getFirstASDF_Transaction(userPubKey);
+        if (onchainFirstTx) {
+            userData.lottery.firstSeenHolding = onchainFirstTx;
+            userData.lottery.firstSeenHoldingSource = 'onchain';
+            console.log(`> [LOTTERY] Set on-chain firstSeenHolding for ${userPubKey.slice(0, 8)}...: ${new Date(onchainFirstTx).toISOString()}`);
+        }
+    }
+
+    // Calculate weeks holding based on firstSeenHolding (if available)
+    if (userData.lottery.firstSeenHolding) {
+        userData.lottery.weeksHolding = Math.floor(
+            (Date.now() - userData.lottery.firstSeenHolding) / (7 * 24 * 60 * 60 * 1000)
+        );
+    } else {
+        userData.lottery.weeksHolding = 0;
+    }
+
+    // Note: We do NOT reset firstSeenHolding on temporary eligibility loss
+    // The on-chain holding duration is preserved even if balance drops temporarily
+
+    await saveUser(userPubKey, userData);
+    return userData;
+}
+
+// --- LOTTERY DRAW MECHANISM ---
+
+// Get earliest transaction for a token account to determine holding duration
+async function getTokenAccountFirstTransaction(connection, tokenAccountAddress) {
+    try {
+        let lastSig = undefined;
+        let oldestTimestamp = null;
+
+        // Paginate through all signatures to find the oldest
+        for (let i = 0; i < 10; i++) {
+            const options = { limit: 1000 };
+            if (lastSig) options.before = lastSig;
+
+            const sigs = await connection.getSignaturesForAddress(
+                new PublicKey(tokenAccountAddress),
+                options
+            );
+
+            if (sigs.length === 0) break;
+
+            // The last signature in the response is the oldest in this batch
+            const oldestSig = sigs[sigs.length - 1];
+            if (oldestSig.blockTime) {
+                oldestTimestamp = oldestSig.blockTime * 1000;
+            }
+
+            lastSig = oldestSig.signature;
+            if (sigs.length < 1000) break; // No more pages
+        }
+
+        return oldestTimestamp;
+    } catch (e) {
+        console.error(`> [LOTTERY] Error getting token account history:`, e.message);
+        return null;
+    }
+}
+
+// Scan all on-chain ASDF holders and return eligible participants with accurate holding duration
+async function getEligibleParticipants() {
+    const participants = [];
+
+    try {
+        const connection = new Connection(SOLANA_NETWORK);
+        const mintPubKey = new PublicKey(ASDF_MINT);
+
+        // Get circulating supply and calculate threshold
+        const supply = await getCirculatingSupply();
+        const threshold = supply * LOTTERY_CONFIG.ELIGIBILITY_PERCENT;
+
+        console.log(`> [LOTTERY] Scanning on-chain holders... Threshold: ${Math.round(threshold).toLocaleString()} ASDF`);
+
+        // Get top token accounts (largest holders)
+        const largestAccounts = await connection.getTokenLargestAccounts(mintPubKey);
+
+        const now = Date.now();
+        const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+
+        for (const account of largestAccounts.value) {
+            const balance = account.uiAmount || 0;
+
+            // Skip if below threshold
+            if (balance < threshold) continue;
+
+            try {
+                // Get owner of this token account
+                const accountInfo = await connection.getParsedAccountInfo(account.address);
+                if (!accountInfo.value || !accountInfo.value.data.parsed) continue;
+
+                const ownerPubKey = accountInfo.value.data.parsed.info.owner;
+
+                // Check user activity - MUST have played on the platform
+                const userData = await getUser(ownerPubKey);
+                const activityDays = userData.lottery?.activityDays || [];
+                const activityMultiplier = calculateActivityMultiplier(activityDays);
+
+                // Skip users with no activity (0 days active = 0 tickets)
+                if (activityMultiplier === 0) {
+                    console.log(`> [LOTTERY] ${ownerPubKey.slice(0, 8)}... | ${Math.round(balance).toLocaleString()} ASDF | NO ACTIVITY - SKIPPED`);
+                    continue;
+                }
+
+                // Get first transaction timestamp for this token account
+                const firstAcquired = await getTokenAccountFirstTransaction(connection, account.address.toString());
+
+                // Calculate weeks holding
+                let weeksHolding = 0;
+                if (firstAcquired) {
+                    weeksHolding = Math.max(0, Math.floor((now - firstAcquired) / oneWeekMs));
+                }
+
+                // Calculate base tickets: 1 base + weeks holding (max 52)
+                const baseTickets = Math.min(1 + weeksHolding, LOTTERY_CONFIG.MAX_TICKETS);
+
+                // Apply activity multiplier: effectiveTickets = baseTickets * (activeDays / 7)
+                const effectiveTickets = Math.max(1, Math.round(baseTickets * activityMultiplier));
+
+                if (effectiveTickets > 0) {
+                    participants.push({
+                        pubKey: ownerPubKey,
+                        tickets: effectiveTickets,
+                        baseTickets: baseTickets,
+                        activityMultiplier: activityMultiplier,
+                        activeDays: activityDays.length,
+                        balance: Math.round(balance),
+                        weeksHolding: weeksHolding,
+                        firstAcquired: firstAcquired
+                    });
+
+                    console.log(`> [LOTTERY] ${ownerPubKey.slice(0, 8)}... | ${Math.round(balance).toLocaleString()} ASDF | ${weeksHolding}w | ${activityDays.length}/7 days | ${effectiveTickets} tickets (base: ${baseTickets})`);
+                }
+
+                // Rate limit to avoid RPC throttling
+                await new Promise(r => setTimeout(r, 200));
+
+            } catch (e) {
+                console.error(`> [LOTTERY] Error processing account:`, e.message);
+            }
+        }
+
+        console.log(`> [LOTTERY] Scan complete. ${participants.length} eligible holders with activity found.`);
+
+    } catch (e) {
+        console.error("> [LOTTERY] Error scanning holders:", e.message);
+    }
+
+    return participants;
+}
+
+async function executeLotteryDraw() {
+    // Prevent concurrent draws with mutex
+    const release = await lotteryMutex.acquire();
+
+    try {
+        console.log(`> [LOTTERY] Starting draw for Round ${lotteryState.currentRound}...`);
+        // 1. Get all eligible participants
+        const participants = await getEligibleParticipants();
+
+        if (participants.length === 0) {
+            console.log("> [LOTTERY] No eligible participants. Skipping draw.");
+            // Still advance to next round
+            lotteryState.lastDrawTime = Date.now();
+            lotteryState.nextDrawTime = Date.now() + LOTTERY_CONFIG.DRAW_INTERVAL_MS;
+            lotteryState.currentRound++;
+            await saveLotteryState();
+            return { success: false, reason: "NO_PARTICIPANTS" };
+        }
+
+        // 2. Build weighted ticket pool
+        let totalTickets = 0;
+        const ticketPool = [];
+
+        for (const participant of participants) {
+            for (let i = 0; i < participant.tickets; i++) {
+                ticketPool.push(participant.pubKey);
+            }
+            totalTickets += participant.tickets;
+
+            // Mark participation in user data
+            const userData = await getUser(participant.pubKey);
+            // Initialize lottery object if not present
+            if (!userData.lottery) {
+                userData.lottery = { activityDays: [], wins: [], participatedRounds: [] };
+            }
+            if (!userData.lottery.participatedRounds) userData.lottery.participatedRounds = [];
+            userData.lottery.participatedRounds.push(lotteryState.currentRound);
+            await saveUser(participant.pubKey, userData);
+        }
+
+        console.log(`> [LOTTERY] ${participants.length} participants with ${totalTickets} total tickets`);
+
+        // 3. Calculate prize - 552 SYMMETRY: 55.2% of collected ASDF
+        const prize = Math.floor(globalStats.totalASDF * LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT);
+
+        // 4. Select random winner using crypto.randomInt for fairness
+        const randomIndex = crypto.randomInt(0, ticketPool.length);
+        const winnerPubKey = ticketPool[randomIndex];
+
+        console.log(`> [LOTTERY] Winner selected: ${winnerPubKey.slice(0, 8)}...`);
+
+        // 5. Record the draw
+        const drawRecord = {
+            round: lotteryState.currentRound,
+            timestamp: Date.now(),
+            winner: winnerPubKey,
+            prize: prize,
+            totalTickets: totalTickets,
+            participantCount: participants.length,
+            txSignature: null // Will be updated after transfer
+        };
+
+        // 6. Update winner's user data
+        const winnerData = await getUser(winnerPubKey);
+        // Initialize lottery object if not present
+        if (!winnerData.lottery) {
+            winnerData.lottery = { activityDays: [], wins: [], participatedRounds: [] };
+        }
+        if (!winnerData.lottery.wins) winnerData.lottery.wins = [];
+        winnerData.lottery.wins.push({
+            round: lotteryState.currentRound,
+            prize: prize,
+            timestamp: Date.now()
+        });
+        await saveUser(winnerPubKey, winnerData);
+
+        // 7. Save draw to history
+        lotteryHistory.draws.unshift(drawRecord);
+        if (lotteryHistory.draws.length > 52) {
+            lotteryHistory.draws = lotteryHistory.draws.slice(0, 52); // Keep 1 year of history
+        }
+        await saveLotteryHistory();
+
+        // 8. Update lottery state for next round
+        lotteryState.lastDrawTime = Date.now();
+        lotteryState.nextDrawTime = Date.now() + LOTTERY_CONFIG.DRAW_INTERVAL_MS;
+        lotteryState.currentRound++;
+        await saveLotteryState();
+
+        // Note: Prize pool is calculated dynamically from totalASDF
+        // After draw, totalASDF remains unchanged (ASDF is still held)
+        // Future: implement actual ASDF distribution to winner
+
+        console.log(`> [LOTTERY] Draw complete! Winner: ${winnerPubKey.slice(0, 8)}... Prize: ${prize.toLocaleString()} ASDF`);
+
+        return {
+            success: true,
+            winner: winnerPubKey,
+            prize: prize,
+            totalTickets: totalTickets,
+            participantCount: participants.length,
+            round: drawRecord.round
+        };
+
+    } catch (e) {
+        console.error("> [LOTTERY] Draw failed:", e.message);
+        return { success: false, reason: "DRAW_ERROR", error: e.message };
+    } finally {
+        release(); // Always release mutex
+    }
+}
+
+// Check if it's time for a lottery draw
+async function checkLotterySchedule() {
+    // 552 SYMMETRY: Calculate pool dynamically from real ASDF
+    const currentPool = globalStats.totalASDF * LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT;
+    const isThresholdReached = currentPool >= LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD;
+
+    if (!isThresholdReached) {
+        return; // Pool not full yet - need more volume
+    }
+
+    if (Date.now() >= lotteryState.nextDrawTime) {
+        console.log(`> [LOTTERY] Draw time reached! Pool: ${Math.floor(currentPool).toLocaleString()} ASDF (55.2% of ${Math.floor(globalStats.totalASDF).toLocaleString()})`);
+        await executeLotteryDraw();
+    }
+}
+
+loadGlobalState();
+loadLotteryState();
+loadReferralData();
 
 // ROBUST ASDF SCANNER
 async function updateASDFPurchases() {
@@ -526,11 +1611,16 @@ async function fetchAndCacheExternalData() {
 async function fetchTokenPricesStaggered() {
     if(cacheCycleCount % 10 !== 0) return; // Run every 10th cycle (10 mins)
     log("[TRACKER] Updating Token Prices...", "SYS");
-    
-    // ASDF Price
-    const asdfPrice = await fetchJupiterTokenPrice(ASDF_MINT);
-    externalStatsCache.wallet.tokenPriceUsd = asdfPrice;
-    
+
+    // ASDF Price (from on-chain PumpSwap pool)
+    const priceData = await getASDF_PriceFromPool();
+    externalStatsCache.wallet.tokenPriceUsd = priceData.priceInUsd;
+    externalStatsCache.wallet.tokenPriceInSol = priceData.priceInSol;
+    externalStatsCache.wallet.poolReserves = {
+        asdf: priceData.baseReserve || 0,
+        sol: priceData.quoteReserve || 0
+    };
+
     // SOL Price (Reuse existing game state price if available, else fetch)
     if(gameState.price > 0) {
         externalStatsCache.wallet.solPriceUsd = gameState.price;
@@ -693,7 +1783,7 @@ async function queuePayouts(frameId, result, bets, totalVolume) {
     }
 
     if (result !== "FLAT") {
-        const potLamports = Math.floor((totalVolume * 0.94) * 1e9);
+        const potLamports = Math.floor((totalVolume * PAYOUT_MULTIPLIER) * 1e9);
         const userPositions = {};
         bets.forEach(bet => {
             if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
@@ -833,17 +1923,39 @@ async function closeFrame(closePrice, closeTime) {
         // Update Running Total (also updated via Recalculation)
         globalStats.totalFees += feeAmt;
 
+        // 552 SYMMETRY: Prize pool is dynamically calculated from real ASDF collected
+        // prizePool = totalASDF × 55.2% (calculated in API response, not stored)
+        // This keeps the pool transparent and verifiable on-chain
+
         let winnerCount = 0;
         let payoutTotal = 0;
-        const userPositions = {}; 
-        
+        const userPositions = {};
+
+        // Track all user positions (including for FLAT results - needed for referrals)
+        gameState.bets.forEach(bet => {
+            if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0, sol: 0 };
+            if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
+            else userPositions[bet.user].down += bet.shares;
+            userPositions[bet.user].sol += bet.costSol;
+        });
+
+        // 552 SYMMETRY: Process referral rewards based on BET AMOUNT (not fees)
+        let totalReferrerRewards = 0;
+        let totalUserRebates = 0;
+        for (const [userPubKey, pos] of Object.entries(userPositions)) {
+            if (pos.sol > 0) {
+                const { referrerReward, userRebate } = await processReferralRewards(userPubKey, pos.sol);
+                totalReferrerRewards += referrerReward;
+                totalUserRebates += userRebate;
+            }
+        }
+        if (totalReferrerRewards > 0 || totalUserRebates > 0) {
+            await saveReferralData();
+            log(`> [REFERRAL] Frame ${frameId}: ${totalUserRebates.toFixed(6)} SOL rebates + ${totalReferrerRewards.toFixed(6)} SOL referrer rewards`, "INFO");
+        }
+
         if (result !== "FLAT") {
-            const potSol = frameSol * 0.94;
-            gameState.bets.forEach(bet => {
-                if (!userPositions[bet.user]) userPositions[bet.user] = { up: 0, down: 0 };
-                if (bet.direction === 'UP') userPositions[bet.user].up += bet.shares;
-                else userPositions[bet.user].down += bet.shares;
-            });
+            const potSol = frameSol * PAYOUT_MULTIPLIER;
             for (const [pk, pos] of Object.entries(userPositions)) {
                 const rUp = Math.round(pos.up * 10000) / 10000;
                 const rDown = Math.round(pos.down * 10000) / 10000;
@@ -873,6 +1985,17 @@ async function closeFrame(closePrice, closeTime) {
         if (historySummary.length > 100) historySummary = historySummary.slice(0, 100);
         await atomicWrite(HISTORY_FILE, historySummary);
 
+        // WebSocket: Broadcast frame close event to all clients
+        wsBroadcast('FRAME_CLOSE', {
+            frameId: frameId,
+            result: result,
+            open: openPrice,
+            close: closePrice,
+            winners: winnerCount,
+            totalPayout: payoutTotal,
+            totalSol: frameSol
+        });
+
         // RECALCULATE TOTALS FROM HISTORY TO ENSURE SYNC
         recalculateStatsFromHistory();
 
@@ -893,11 +2016,13 @@ async function closeFrame(closePrice, closeTime) {
                 const outcome = (userDir !== "FLAT" && result !== "FLAT" && userDir === result) ? "WIN" : "LOSS";
                 if (outcome === "WIN") userData.wins += 1; else if (outcome === "LOSS") userData.losses += 1;
                 if (!userData.frameLog) userData.frameLog = {};
-                userData.frameLog[frameId] = { 
+                userData.frameLog[frameId] = {
                     dir: userDir, result: outcome, time: Date.now(),
                     upShares: pos.up, downShares: pos.down, wagered: pos.sol
                 };
                 await saveUser(pubKey, userData);
+                // Check for new badges after updating stats
+                await checkAndAwardBadges(pubKey, userData, { outcome });
             }));
         }
 
@@ -952,6 +2077,19 @@ async function updatePrice() {
         await stateMutex.runExclusive(async () => {
             gameState.price = fetchedPrice;
             gameState.lastPriceTimestamp = Date.now();
+
+            // WebSocket: Broadcast price update
+            const priceChange = gameState.price - gameState.candleOpen;
+            const percentChange = gameState.candleOpen ? (priceChange / gameState.candleOpen) * 100 : 0;
+            wsBroadcast('PRICE', {
+                price: fetchedPrice,
+                change: percentChange,
+                timestamp: gameState.lastPriceTimestamp
+            });
+
+            // Check price alerts for all connected clients
+            checkPriceAlerts(fetchedPrice);
+
             const currentWindowStart = getCurrentWindowStart();
 
             if (Date.now() >= gameState.hourlySentiment.nextReset) {
@@ -1077,8 +2215,12 @@ function updatePublicStateCache() {
         isPaused: gameState.isPaused,
         isResetting: gameState.isResetting,
         isCancelled: gameState.isCancelled,
-        broadcast: gameState.broadcast,
-        market: { priceUp, priceDown, sharesUp: gameState.poolShares.up, sharesDown: gameState.poolShares.down, changes },
+        market: {
+            priceUp, priceDown,
+            sharesUp: gameState.poolShares.up,
+            sharesDown: gameState.poolShares.down,
+            changes
+        },
         history: historySummary,
         recentTrades: gameState.recentTrades,
         leaderboard: globalLeaderboard,
@@ -1088,13 +2230,188 @@ function updatePublicStateCache() {
         lastFramePot: lastFramePot,
         totalLifetimeUsers: globalStats.totalLifetimeUsers,
         totalWinnings: globalStats.totalWinnings,
-        hourlySentiment: gameState.hourlySentiment
+        // Broadcast & Sentiment
+        broadcast: gameState.broadcast,
+        hourlySentiment: gameState.hourlySentiment,
+        // Lottery summary - 552 SYMMETRY
+        lottery: (() => {
+            // Dynamic calculation: 55.2% of collected ASDF goes to pool
+            const prizePool = Math.floor(globalStats.totalASDF * LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT);
+            const isThresholdReached = prizePool >= LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD;
+            return {
+                currentRound: lotteryState.currentRound,
+                nextDrawTime: lotteryState.nextDrawTime,
+                msUntilDraw: Math.max(0, lotteryState.nextDrawTime - now),
+                recentWinner: lotteryHistory.draws.length > 0 ? lotteryHistory.draws[0].winner : null,
+                recentPrize: lotteryHistory.draws.length > 0 ? lotteryHistory.draws[0].prize : null,
+                // 552 SYMMETRY: 55.2% of totalASDF = prize pool
+                prizePool: prizePool,
+                prizePoolThreshold: LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD,
+                prizePoolPercent: Math.min(100, (prizePool / LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD) * 100),
+                isThresholdReached: isThresholdReached,
+                // Transparency: show source data
+                totalASDF: Math.floor(globalStats.totalASDF),
+                allocationPercent: LOTTERY_CONFIG.ASDF_TO_POOL_PERCENT * 100
+            };
+        })(),
+        // Referral summary - 552 SYMMETRY + Golden Ratio Decay
+        referral: {
+            totalReferrers: Object.keys(referralData.links).length,
+            totalReferred: Object.keys(referralData.userToReferrer).length,
+            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed (filleul)
+            baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base (parrain)
+            referrerDecay: 'golden_ratio',  // Rate decays with φ as referrals increase
+            minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
+            rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
+        }
     };
+
+    // WebSocket: Broadcast state to all connected clients
+    wsBroadcast('STATE', cachedPublicState);
 }
 
 setInterval(updatePublicStateCache, 500);
 
 // --- ENDPOINTS ---
+
+// Health check endpoint for monitoring
+app.get('/api/health', async (req, res) => {
+    const health = {
+        status: 'ok',
+        timestamp: Date.now(),
+        version: BACKEND_VERSION,
+        uptime: Math.floor(process.uptime()),
+        services: {
+            rpc: { status: 'unknown', latency: null },
+            pumpswap: { status: 'unknown', price: null },
+            pyth: { status: 'unknown', price: null }
+        },
+        memory: {
+            heapUsed: Math.floor(process.memoryUsage().heapUsed / 1024 / 1024),
+            heapTotal: Math.floor(process.memoryUsage().heapTotal / 1024 / 1024),
+            rss: Math.floor(process.memoryUsage().rss / 1024 / 1024)
+        },
+        gameState: {
+            isInitialized,
+            isPaused: gameState?.isPaused || false,
+            currentFrame: gameState?.candleStartTime || null,
+            payoutQueueLength: currentQueueLength || 0
+        },
+        websocket: {
+            connectedClients: wsClients?.size || 0
+        }
+    };
+
+    // Test RPC connection
+    try {
+        const start = Date.now();
+        const conn = new Connection(SOLANA_NETWORK);
+        await conn.getSlot();
+        health.services.rpc = { status: 'ok', latency: Date.now() - start };
+    } catch (e) {
+        health.services.rpc = { status: 'error', error: e.message };
+        health.status = 'degraded';
+    }
+
+    // Test PumpSwap price
+    try {
+        const priceData = await getASDF_PriceFromPool();
+        health.services.pumpswap = {
+            status: priceData.priceInSol > 0 ? 'ok' : 'stale',
+            price: priceData.priceInSol,
+            reserves: { asdf: priceData.baseReserve, sol: priceData.quoteReserve }
+        };
+    } catch (e) {
+        health.services.pumpswap = { status: 'error', error: e.message };
+        health.status = 'degraded';
+    }
+
+    // Pyth oracle status
+    health.services.pyth = {
+        status: gameState?.price > 0 ? 'ok' : 'stale',
+        price: gameState?.price || 0
+    };
+
+    const statusCode = health.status === 'ok' ? 200 : 503;
+    res.status(statusCode).json(health);
+});
+
+// Prometheus-compatible metrics endpoint
+app.get('/api/metrics', (req, res) => {
+    const metrics = [
+        '# HELP asdforecast_uptime_seconds Server uptime in seconds',
+        '# TYPE asdforecast_uptime_seconds gauge',
+        `asdforecast_uptime_seconds ${Math.floor(process.uptime())}`,
+
+        '# HELP asdforecast_total_volume_sol Total betting volume in SOL',
+        '# TYPE asdforecast_total_volume_sol counter',
+        `asdforecast_total_volume_sol ${globalStats?.totalVolume || 0}`,
+
+        '# HELP asdforecast_total_fees_sol Total fees collected in SOL',
+        '# TYPE asdforecast_total_fees_sol counter',
+        `asdforecast_total_fees_sol ${globalStats?.totalFees || 0}`,
+
+        '# HELP asdforecast_total_asdf_collected Total ASDF collected',
+        '# TYPE asdforecast_total_asdf_collected counter',
+        `asdforecast_total_asdf_collected ${globalStats?.totalASDF || 0}`,
+
+        '# HELP asdforecast_active_users Total registered users',
+        '# TYPE asdforecast_active_users gauge',
+        `asdforecast_active_users ${knownUsers?.size || 0}`,
+
+        '# HELP asdforecast_payout_queue_length Pending payouts in queue',
+        '# TYPE asdforecast_payout_queue_length gauge',
+        `asdforecast_payout_queue_length ${currentQueueLength || 0}`,
+
+        '# HELP asdforecast_sol_price Current SOL price in USD',
+        '# TYPE asdforecast_sol_price gauge',
+        `asdforecast_sol_price ${gameState?.price || 0}`,
+
+        '# HELP asdforecast_asdf_price_sol Current ASDF price in SOL',
+        '# TYPE asdforecast_asdf_price_sol gauge',
+        `asdforecast_asdf_price_sol ${cachedASDF_Price?.priceInSol || 0}`,
+
+        '# HELP asdforecast_lottery_pool Current lottery prize pool in ASDF',
+        '# TYPE asdforecast_lottery_pool gauge',
+        `asdforecast_lottery_pool ${lotteryState?.dynamicPrizePool || 0}`,
+
+        '# HELP asdforecast_lottery_round Current lottery round number',
+        '# TYPE asdforecast_lottery_round gauge',
+        `asdforecast_lottery_round ${lotteryState?.currentRound || 0}`,
+
+        '# HELP asdforecast_referrers_total Total number of referrers',
+        '# TYPE asdforecast_referrers_total gauge',
+        `asdforecast_referrers_total ${Object.keys(referralData?.links || {}).length}`,
+
+        '# HELP asdforecast_referred_users_total Total referred users',
+        '# TYPE asdforecast_referred_users_total gauge',
+        `asdforecast_referred_users_total ${Object.keys(referralData?.userToReferrer || {}).length}`,
+
+        '# HELP asdforecast_memory_heap_bytes Memory heap usage in bytes',
+        '# TYPE asdforecast_memory_heap_bytes gauge',
+        `asdforecast_memory_heap_bytes ${process.memoryUsage().heapUsed}`,
+
+        '# HELP asdforecast_memory_rss_bytes Memory RSS in bytes',
+        '# TYPE asdforecast_memory_rss_bytes gauge',
+        `asdforecast_memory_rss_bytes ${process.memoryUsage().rss}`,
+
+        '# HELP asdforecast_is_initialized Server initialization status',
+        '# TYPE asdforecast_is_initialized gauge',
+        `asdforecast_is_initialized ${isInitialized ? 1 : 0}`,
+
+        '# HELP asdforecast_is_paused Game paused status',
+        '# TYPE asdforecast_is_paused gauge',
+        `asdforecast_is_paused ${gameState?.isPaused ? 1 : 0}`,
+
+        '# HELP asdforecast_websocket_clients Connected WebSocket clients',
+        '# TYPE asdforecast_websocket_clients gauge',
+        `asdforecast_websocket_clients ${wsClients?.size || 0}`
+    ];
+
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(metrics.join('\n') + '\n');
+});
+
 app.get('/api/state', stateLimiter, async (req, res) => {
     if (!isInitialized || !cachedPublicState) return res.status(503).json({ error: "SERVICE_UNAVAILABLE", reason: "Backend cache initializing." });
     const response = { ...cachedPublicState };
@@ -1242,6 +2559,9 @@ app.post('/api/verify-bet', betLimiter, async (req, res) => {
 
         getUser(userPubKey).then(userData => { userData.totalSol += solAmount; saveUser(userPubKey, userData); });
 
+        // Record daily activity for lottery eligibility
+        recordUserActivity(userPubKey);
+
         gameState.bets.push({ signature, user: userPubKey, direction, costSol: solAmount, entryPrice: price, shares: sharesReceived, timestamp: Date.now() });
         gameState.recentTrades.unshift({ user: userPubKey, direction, shares: sharesReceived, time: Date.now() });
         if (gameState.recentTrades.length > 20) gameState.recentTrades.pop();
@@ -1281,7 +2601,7 @@ app.post('/api/admin/cancel-frame', async (req, res) => {
         await cancelCurrentFrameAndRefund();
         log(`> [ADMIN] Frame Cancelled by Admin`, "ADMIN");
         res.json({ success: true, message: "Frame Cancelled. Market Paused." });
-    } catch (e) { log(`> [ERR] Admin Cancel Error: ${e}`, "ERR"); res.status(500).json({ error: "ADMIN_ERROR" }); } 
+    } catch (e) { console.error(e); res.status(500).json({ error: "ADMIN_ERROR" }); }
     finally { release(); }
 });
 
@@ -1293,11 +2613,841 @@ app.post('/api/admin/broadcast', async (req, res) => {
     try {
         gameState.broadcast = { message: message || "", isActive: !!isActive };
         await saveSystemState();
-        updatePublicStateCache(); 
+        updatePublicStateCache();
         log(`> [ADMIN] Broadcast updated: "${message}" (Active: ${isActive})`, "ADMIN");
         res.json({ success: true, broadcast: gameState.broadcast });
-    } catch (e) { log(`> [ERR] Admin Broadcast Error: ${e}`, "ERR"); res.status(500).json({ error: "ADMIN_ERROR" }); } 
+    } catch (e) { log(`> [ERR] Admin Broadcast Error: ${e}`, "ERR"); res.status(500).json({ error: "ADMIN_ERROR" }); }
     finally { release(); }
 });
 
-app.listen(PORT, () => { log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`, "SYS"); loadAndInit(); });
+// --- LOTTERY ENDPOINTS ---
+app.get('/api/lottery/status', stateLimiter, async (req, res) => {
+    try {
+        const supply = await getCirculatingSupply();
+        const threshold = supply * LOTTERY_CONFIG.ELIGIBILITY_PERCENT;
+
+        res.json({
+            currentRound: lotteryState.currentRound,
+            nextDrawTime: lotteryState.nextDrawTime,
+            msUntilDraw: Math.max(0, lotteryState.nextDrawTime - Date.now()),
+            lastDrawTime: lotteryState.lastDrawTime,
+            eligibilityThreshold: threshold,
+            circulatingSupply: supply,
+            config: {
+                eligibilityPercent: LOTTERY_CONFIG.ELIGIBILITY_PERCENT * 100,
+                maxTickets: LOTTERY_CONFIG.MAX_TICKETS,
+                basePrize: LOTTERY_CONFIG.BASE_PRIZE,
+                prizePerTicket: LOTTERY_CONFIG.PRIZE_PER_TICKET
+            },
+            recentWinner: lotteryHistory.draws.length > 0 ? {
+                winner: lotteryHistory.draws[0].winner,
+                prize: lotteryHistory.draws[0].prize,
+                round: lotteryHistory.draws[0].round,
+                timestamp: lotteryHistory.draws[0].timestamp
+            } : null
+        });
+    } catch (e) {
+        console.error("> [LOTTERY] Status error:", e.message);
+        res.status(500).json({ error: "LOTTERY_STATUS_ERROR" });
+    }
+});
+
+app.get('/api/lottery/eligibility', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await updateUserLotteryStatus(userKey);
+        const tickets = calculateTickets(userData);
+
+        const supply = await getCirculatingSupply();
+        const threshold = supply * LOTTERY_CONFIG.ELIGIBILITY_PERCENT;
+
+        res.json({
+            isEligible: userData.lottery?.isEligible || false,
+            balance: userData.lottery?.currentBalance || 0,
+            threshold: threshold,
+            tickets: tickets.effective,
+            baseTickets: tickets.base,
+            activityMultiplier: tickets.multiplier,
+            activeDays: tickets.activeDays,
+            activityWindowDays: LOTTERY_CONFIG.ACTIVITY_WINDOW_DAYS,
+            maxTickets: LOTTERY_CONFIG.MAX_TICKETS,
+            weeksHolding: userData.lottery?.weeksHolding || 0,
+            firstSeenHolding: userData.lottery?.firstSeenHolding,
+            wins: userData.lottery?.wins || [],
+            participatedRounds: userData.lottery?.participatedRounds || []
+        });
+    } catch (e) {
+        console.error(`> [LOTTERY] Eligibility error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "ELIGIBILITY_CHECK_ERROR" });
+    }
+});
+
+app.get('/api/lottery/history', stateLimiter, (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 10, 52);
+
+    res.json({
+        draws: lotteryHistory.draws.slice(0, limit),
+        totalDraws: lotteryHistory.draws.length
+    });
+});
+
+app.post('/api/admin/lottery/draw', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) {
+        return res.status(403).json({ error: "UNAUTHORIZED" });
+    }
+
+    try {
+        console.log("> [ADMIN] Manual lottery draw triggered");
+        const result = await executeLotteryDraw();
+        res.json(result);
+    } catch (e) {
+        console.error("> [ADMIN] Lottery draw error:", e.message);
+        res.status(500).json({ error: "DRAW_ERROR", message: e.message });
+    }
+});
+
+// --- REFERRAL API (552 SYMMETRY) ---
+
+// Get or create referral code for a user
+app.get('/api/referral/code', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const existingCode = referralData.links[userKey]?.code;
+
+        if (existingCode) {
+            const link = referralData.links[userKey];
+            return res.json({
+                code: existingCode,
+                referredCount: link.referredUsers.length,
+                totalFeesGenerated: link.totalFeesGenerated,
+                totalRewardsEarned: link.totalRewardsEarned,
+                createdAt: link.createdAt
+            });
+        }
+
+        // Try to create new code (requires ASDF balance)
+        const code = await getOrCreateReferralCode(userKey);
+
+        if (!code) {
+            const balance = await getUserASDFBalance(userKey);
+            return res.status(403).json({
+                error: "INSUFFICIENT_ASDF",
+                required: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
+                current: balance,
+                message: `Need ${REFERRAL_CONFIG.MIN_ASDF_TO_REFER.toLocaleString()} ASDF to create referral code`
+            });
+        }
+
+        res.json({
+            code: code,
+            referredCount: 0,
+            totalFeesGenerated: 0,
+            totalRewardsEarned: 0,
+            createdAt: Date.now(),
+            isNew: true
+        });
+    } catch (e) {
+        console.error(`> [REFERRAL] Code error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "REFERRAL_CODE_ERROR" });
+    }
+});
+
+// Register with a referral code
+app.post('/api/referral/register', registerLimiter, async (req, res) => {
+    const { user, code } = req.body;
+
+    if (!user || !isValidSolanaAddress(user)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    if (!code || typeof code !== 'string' || code.length !== REFERRAL_CONFIG.CODE_LENGTH) {
+        return res.status(400).json({ error: "INVALID_REFERRAL_CODE" });
+    }
+
+    try {
+        const result = await registerReferral(user, code);
+
+        if (!result.success) {
+            const errorMessages = {
+                'INVALID_CODE': 'Referral code not found',
+                'SELF_REFERRAL': 'Cannot use your own referral code',
+                'ALREADY_REFERRED': 'You have already been referred',
+                'REFERRER_MAX_REACHED': 'Referrer has reached maximum referrals'
+            };
+            return res.status(400).json({
+                error: result.error,
+                message: errorMessages[result.error] || 'Registration failed'
+            });
+        }
+
+        res.json({
+            success: true,
+            referrer: result.referrer.slice(0, 8) + '...',
+            message: 'Successfully registered! You earn 0.552% of your bets in ASDF, referrer earns 0.448%.'
+        });
+    } catch (e) {
+        console.error(`> [REFERRAL] Register error for ${user}:`, e.message);
+        res.status(500).json({ error: "REFERRAL_REGISTER_ERROR" });
+    }
+});
+
+// Get referral stats for a user (552 SYMMETRY - Gambler-Holder Alignment)
+app.get('/api/referral/stats', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const isReferrer = !!referralData.links[userKey];
+        const referrerData = referralData.links[userKey];
+        const referredBy = referralData.userToReferrer[userKey];
+        const pendingData = referralData.pendingRewards?.[userKey];
+
+        // Get ASDF price and user balance for claimable calculation
+        const asdfPrice = await getASDF_Price();
+        const priceAvailable = asdfPrice > 0;
+        const userASDF_Balance = await getUserASDFBalance(userKey);
+
+        // Calculate pending rewards in SOL and ASDF
+        const pendingAsReferrerSOL = pendingData?.asReferrer || 0;
+        const pendingAsUserSOL = pendingData?.asUser || 0;
+        const totalPendingSOL = pendingAsReferrerSOL + pendingAsUserSOL;
+
+        // Convert SOL value to ASDF amount (SOL / ASDF_price_in_SOL)
+        const pendingASDF = asdfPrice > 0 ? totalPendingSOL / asdfPrice : 0;
+
+        // Claimable = min(pendingASDF, userBalance) - Proportional claim rule
+        const claimableASDF = Math.min(pendingASDF, userASDF_Balance);
+
+        res.json({
+            // As a referrer (parrain)
+            isReferrer: isReferrer,
+            referralCode: referrerData?.code || null,
+            referredUsers: referrerData?.referredUsers?.length || 0,
+            totalVolumeGenerated: referrerData?.totalVolumeGenerated || 0,
+            // As a referred user (filleul)
+            referredBy: referredBy ? referredBy.slice(0, 8) + '...' : null,
+            referredAt: userData.referredAt || null,
+            // Pending rewards (in SOL value, paid in ASDF)
+            pending: {
+                asReferrerSOL: pendingAsReferrerSOL,   // 0.448% earned from referrals
+                asUserSOL: pendingAsUserSOL,           // 0.552% rebate from own bets
+                totalSOL: totalPendingSOL,
+                totalASDF: Math.floor(pendingASDF),    // Converted at current price
+                totalClaimedASDF: pendingData?.totalClaimedASDF || 0
+            },
+            // Claim info (proportional to holding)
+            claim: {
+                userASDF_Balance: Math.floor(userASDF_Balance),
+                claimableASDF: Math.floor(claimableASDF),
+                claimRatio: REFERRAL_CONFIG.CLAIM_RATIO,
+                asdfPriceSOL: asdfPrice
+            },
+            // Config - Golden Ratio Decay
+            userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed
+            baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base
+            currentReferrerRate: referrerData ? getReferrerRate(referrerData.referredUsers?.length || 0) * 100 : REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,
+            referrerDecay: 'golden_ratio',  // φ-based decay
+            minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
+            rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY,
+            // Price status
+            priceAvailable: priceAvailable,
+            priceWarning: priceAvailable ? null : "Price temporarily unavailable - rewards displayed may be inaccurate"
+        });
+    } catch (e) {
+        console.error(`> [REFERRAL] Stats error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "REFERRAL_STATS_ERROR" });
+    }
+});
+
+// Claim referral rewards (552 SYMMETRY - Proportional to ASDF holding)
+app.post('/api/referral/claim', claimLimiter, async (req, res) => {
+    const { user } = req.body;
+
+    if (!user || !isValidSolanaAddress(user)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const pendingData = referralData.pendingRewards?.[user];
+        if (!pendingData) {
+            return res.status(400).json({ error: "NO_PENDING_REWARDS", message: "No rewards to claim" });
+        }
+
+        const totalPendingSOL = (pendingData.asReferrer || 0) + (pendingData.asUser || 0);
+        if (totalPendingSOL <= 0) {
+            return res.status(400).json({ error: "NO_PENDING_REWARDS", message: "No rewards to claim" });
+        }
+
+        // Get current ASDF price and user balance
+        const asdfPrice = await getASDF_Price();
+        if (asdfPrice <= 0) {
+            return res.status(500).json({ error: "PRICE_UNAVAILABLE", message: "Cannot fetch ASDF price" });
+        }
+
+        const userASDF_Balance = await getUserASDFBalance(user);
+
+        // Convert pending SOL to ASDF
+        const totalPendingASDF = totalPendingSOL / asdfPrice;
+
+        // Proportional claim: can only claim up to your ASDF balance
+        const claimableASDF = Math.min(totalPendingASDF, userASDF_Balance * REFERRAL_CONFIG.CLAIM_RATIO);
+
+        if (claimableASDF <= 0) {
+            return res.status(400).json({
+                error: "INSUFFICIENT_HOLDING",
+                message: "You must hold ASDF to claim rewards. Buy ASDF to unlock your rewards!",
+                pendingASDF: Math.floor(totalPendingASDF),
+                yourBalance: Math.floor(userASDF_Balance),
+                hint: "Claimable amount = min(pending rewards, your ASDF balance)"
+            });
+        }
+
+        // Calculate how much SOL value is being claimed
+        const claimedSOL = claimableASDF * asdfPrice;
+        const remainingSOL = totalPendingSOL - claimedSOL;
+
+        // Execute ASDF transfer from house wallet to user
+        let txSignature = null;
+        try {
+            txSignature = await transferASDF(user, Math.floor(claimableASDF));
+        } catch (transferError) {
+            console.error(`> [REFERRAL] Transfer failed for ${user}:`, transferError.message);
+            return res.status(500).json({
+                error: "TRANSFER_FAILED",
+                message: "ASDF transfer failed. Please try again later.",
+                details: transferError.message
+            });
+        }
+
+        // Update pending rewards only after successful transfer
+        const claimRatio = claimedSOL / totalPendingSOL;
+        referralData.pendingRewards[user].asReferrer *= (1 - claimRatio);
+        referralData.pendingRewards[user].asUser *= (1 - claimRatio);
+        referralData.pendingRewards[user].totalClaimedASDF =
+            (referralData.pendingRewards[user].totalClaimedASDF || 0) + claimableASDF;
+
+        await saveReferralData();
+
+        console.log(`> [REFERRAL] Claim SUCCESS: ${user.slice(0, 8)}... claimed ${Math.floor(claimableASDF)} ASDF | Tx: ${txSignature?.slice(0, 20)}...`);
+
+        res.json({
+            success: true,
+            claimed: {
+                asdf: Math.floor(claimableASDF),
+                solValue: claimedSOL
+            },
+            remaining: {
+                solValue: remainingSOL,
+                asdf: Math.floor(remainingSOL / asdfPrice)
+            },
+            totalClaimed: Math.floor(referralData.pendingRewards[user].totalClaimedASDF),
+            message: `Successfully claimed ${Math.floor(claimableASDF).toLocaleString()} ASDF!`,
+            txSignature: txSignature
+        });
+    } catch (e) {
+        console.error(`> [REFERRAL] Claim error for ${user}:`, e.message);
+        res.status(500).json({ error: "CLAIM_ERROR", message: e.message });
+    }
+});
+
+// ===================
+// USER BET HISTORY API
+// ===================
+
+// Get user's bet history with stats
+app.get('/api/user/history', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);  // Max 100
+    const offset = parseInt(req.query.offset) || 0;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const frameLog = userData.frameLog || {};
+
+        // Convert frameLog object to sorted array (newest first)
+        const allBets = Object.entries(frameLog)
+            .map(([frameId, bet]) => ({
+                frameId: parseInt(frameId),
+                timestamp: bet.time,
+                direction: bet.dir,
+                result: bet.result,
+                upShares: bet.upShares || 0,
+                downShares: bet.downShares || 0,
+                wagered: bet.wagered || 0
+            }))
+            .sort((a, b) => b.frameId - a.frameId);
+
+        // Calculate stats
+        const totalBets = allBets.length;
+        const wins = allBets.filter(b => b.result === 'WIN').length;
+        const losses = allBets.filter(b => b.result === 'LOSS').length;
+        const totalWagered = allBets.reduce((sum, b) => sum + b.wagered, 0);
+        const winRate = totalBets > 0 ? (wins / totalBets * 100).toFixed(2) : 0;
+
+        // Paginate
+        const paginatedBets = allBets.slice(offset, offset + limit);
+
+        res.json({
+            user: userKey,
+            stats: {
+                totalBets,
+                wins,
+                losses,
+                winRate: parseFloat(winRate),
+                totalWagered: parseFloat(totalWagered.toFixed(6)),
+                framesPlayed: userData.framesPlayed || 0
+            },
+            pagination: {
+                limit,
+                offset,
+                total: totalBets,
+                hasMore: offset + limit < totalBets
+            },
+            bets: paginatedBets
+        });
+    } catch (e) {
+        console.error(`> [USER] History error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "HISTORY_ERROR" });
+    }
+});
+
+// ===================
+// ACHIEVEMENTS SYSTEM
+// ===================
+
+const BADGES = config.ACHIEVEMENTS.BADGES;
+
+// Check and award badges based on user stats
+async function checkAndAwardBadges(pubKey, userData, context = {}) {
+    if (!userData.badges) userData.badges = [];
+    const existingBadges = new Set(userData.badges.map(b => b.id));
+    const newBadges = [];
+
+    const frameLog = userData.frameLog || {};
+    const bets = Object.values(frameLog);
+    const totalWagered = bets.reduce((sum, b) => sum + (b.wagered || 0), 0);
+    const wins = userData.wins || 0;
+    const framesPlayed = userData.framesPlayed || 0;
+
+    // FIRST_BET - Place your first bet
+    if (framesPlayed >= 1 && !existingBadges.has('FIRST_BET')) {
+        newBadges.push({ id: 'FIRST_BET', earnedAt: Date.now() });
+    }
+
+    // FIRST_WIN - Win your first frame
+    if (wins >= 1 && !existingBadges.has('FIRST_WIN')) {
+        newBadges.push({ id: 'FIRST_WIN', earnedAt: Date.now() });
+    }
+
+    // WIN_STREAK_3 - Win 3 in a row (check from context)
+    if (context.winStreak >= 3 && !existingBadges.has('WIN_STREAK_3')) {
+        newBadges.push({ id: 'WIN_STREAK_3', earnedAt: Date.now() });
+    }
+
+    // WINS_10, WINS_50, WINS_100
+    if (wins >= 10 && !existingBadges.has('WINS_10')) {
+        newBadges.push({ id: 'WINS_10', earnedAt: Date.now() });
+    }
+    if (wins >= 50 && !existingBadges.has('WINS_50')) {
+        newBadges.push({ id: 'WINS_50', earnedAt: Date.now() });
+    }
+    if (wins >= 100 && !existingBadges.has('WINS_100')) {
+        newBadges.push({ id: 'WINS_100', earnedAt: Date.now() });
+    }
+
+    // FRAMES_100 - Play 100 frames
+    if (framesPlayed >= 100 && !existingBadges.has('FRAMES_100')) {
+        newBadges.push({ id: 'FRAMES_100', earnedAt: Date.now() });
+    }
+
+    // VOLUME_1, VOLUME_10 - Total wagered
+    if (totalWagered >= 1 && !existingBadges.has('VOLUME_1')) {
+        newBadges.push({ id: 'VOLUME_1', earnedAt: Date.now() });
+    }
+    if (totalWagered >= 10 && !existingBadges.has('VOLUME_10')) {
+        newBadges.push({ id: 'VOLUME_10', earnedAt: Date.now() });
+    }
+
+    // REFERRER_5 - Refer 5 users
+    const referrerData = referralData.links[pubKey];
+    if (referrerData && (referrerData.referredUsers?.length || 0) >= 5 && !existingBadges.has('REFERRER_5')) {
+        newBadges.push({ id: 'REFERRER_5', earnedAt: Date.now() });
+    }
+
+    // HODLER - Hold ASDF for 4+ weeks
+    if (userData.lottery?.weeksHolding >= 4 && !existingBadges.has('HODLER')) {
+        newBadges.push({ id: 'HODLER', earnedAt: Date.now() });
+    }
+
+    // Award new badges
+    if (newBadges.length > 0) {
+        userData.badges.push(...newBadges);
+        await saveUser(pubKey, userData);
+
+        // Notify via WebSocket
+        for (const badge of newBadges) {
+            const badgeInfo = BADGES[badge.id];
+            wsBroadcastToUser(pubKey, 'BADGE_EARNED', {
+                id: badge.id,
+                name: badgeInfo.name,
+                description: badgeInfo.description,
+                icon: badgeInfo.icon,
+                earnedAt: badge.earnedAt
+            });
+        }
+    }
+
+    return newBadges;
+}
+
+// Get user's badges
+app.get('/api/user/badges', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const userBadges = userData.badges || [];
+
+        // Enrich badges with metadata
+        const enrichedBadges = userBadges.map(badge => ({
+            ...badge,
+            ...BADGES[badge.id]
+        }));
+
+        // List all available badges with earned status
+        const allBadges = Object.entries(BADGES).map(([id, info]) => {
+            const earned = userBadges.find(b => b.id === id);
+            return {
+                id,
+                ...info,
+                earned: !!earned,
+                earnedAt: earned?.earnedAt || null
+            };
+        });
+
+        res.json({
+            user: userKey,
+            earned: enrichedBadges,
+            earnedCount: enrichedBadges.length,
+            totalBadges: Object.keys(BADGES).length,
+            allBadges
+        });
+    } catch (e) {
+        console.error(`> [USER] Badges error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "BADGES_ERROR" });
+    }
+});
+
+// Get user's overall stats (quick endpoint)
+app.get('/api/user/stats', stateLimiter, async (req, res) => {
+    const userKey = req.query.user;
+
+    if (!userKey || !isValidSolanaAddress(userKey)) {
+        return res.status(400).json({ error: "INVALID_USER_ADDRESS" });
+    }
+
+    try {
+        const userData = await getUser(userKey);
+        const frameLog = userData.frameLog || {};
+        const bets = Object.values(frameLog);
+
+        const totalWagered = bets.reduce((sum, b) => sum + (b.wagered || 0), 0);
+        const totalBets = bets.length;
+        const wins = userData.wins || 0;
+        const losses = userData.losses || 0;
+
+        res.json({
+            user: userKey,
+            framesPlayed: userData.framesPlayed || 0,
+            wins,
+            losses,
+            winRate: totalBets > 0 ? parseFloat((wins / totalBets * 100).toFixed(2)) : 0,
+            totalWagered: parseFloat(totalWagered.toFixed(6)),
+            totalBets,
+            // Lottery stats
+            lottery: {
+                isEligible: userData.lottery?.isEligible || false,
+                weeksHolding: userData.lottery?.weeksHolding || 0,
+                currentBalance: userData.lottery?.currentBalance || 0
+            },
+            // Referral stats
+            referral: {
+                referredBy: userData.referredBy ? true : false,
+                referredAt: userData.referredAt || null
+            },
+            createdAt: userData.createdAt || null
+        });
+    } catch (e) {
+        console.error(`> [USER] Stats error for ${userKey}:`, e.message);
+        res.status(500).json({ error: "STATS_ERROR" });
+    }
+});
+
+// Admin: Get global referral stats (552 SYMMETRY)
+app.get('/api/admin/referral/stats', (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) {
+        return res.status(403).json({ error: "UNAUTHORIZED" });
+    }
+
+    const totalReferrers = Object.keys(referralData.links).length;
+    const totalReferred = Object.keys(referralData.userToReferrer).length;
+
+    let totalVolumeGenerated = 0;
+    let totalPendingReferrerSOL = 0;
+    let totalPendingUserSOL = 0;
+    let totalClaimedASDF = 0;
+
+    for (const link of Object.values(referralData.links)) {
+        totalVolumeGenerated += link.totalVolumeGenerated || 0;
+    }
+
+    for (const pending of Object.values(referralData.pendingRewards || {})) {
+        totalPendingReferrerSOL += pending.asReferrer || 0;
+        totalPendingUserSOL += pending.asUser || 0;
+        totalClaimedASDF += pending.totalClaimedASDF || 0;
+    }
+
+    res.json({
+        totalReferrers,
+        totalReferred,
+        totalVolumeGenerated,                                      // Total bet volume from referred users
+        pendingRewards: {
+            referrerSOL: totalPendingReferrerSOL,                 // 0.448% pending to referrers
+            userRebateSOL: totalPendingUserSOL,                   // 0.552% pending to users
+            totalSOL: totalPendingReferrerSOL + totalPendingUserSOL
+        },
+        totalClaimedASDF,
+        // Config - Golden Ratio Decay
+        userRebatePercent: REFERRAL_CONFIG.USER_REBATE_PERCENT * 100,      // 0.552% fixed
+        baseReferrerRate: REFERRAL_CONFIG.BASE_REFERRER_RATE * 100,        // 0.448% base (decays with φ)
+        referrerDecay: 'golden_ratio',
+        minASDF: REFERRAL_CONFIG.MIN_ASDF_TO_REFER,
+        rewardCurrency: REFERRAL_CONFIG.REWARD_CURRENCY
+    });
+});
+
+// Admin: Comprehensive dashboard stats
+app.get('/api/admin/stats', async (req, res) => {
+    const auth = req.headers['x-admin-secret'];
+    if (!auth || auth !== process.env.ADMIN_ACTION_PASSWORD) {
+        return res.status(403).json({ error: "UNAUTHORIZED" });
+    }
+
+    try {
+        // Get user count from users directory
+        const userFiles = await fs.readdir(USERS_DIR).catch(() => []);
+        const totalUsers = userFiles.filter(f => f.endsWith('.json')).length;
+
+        // Calculate today's stats from history
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todayTs = today.getTime();
+
+        const todayFrames = historySummary.filter(f => f.startTime >= todayTs);
+        const todayVolume = todayFrames.reduce((sum, f) => sum + f.totalSol, 0);
+        const todayFees = todayFrames.reduce((sum, f) => sum + f.fee, 0);
+        const todayUsers = new Set(todayFrames.flatMap(f => Object.keys(f.users || {}))).size;
+
+        // Calculate 7-day rolling stats
+        const weekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        const weekFrames = historySummary.filter(f => f.startTime >= weekAgo);
+        const weekVolume = weekFrames.reduce((sum, f) => sum + f.totalSol, 0);
+        const weekFees = weekFrames.reduce((sum, f) => sum + f.fee, 0);
+
+        // Frame stats
+        const totalFrames = historySummary.length;
+        const upWins = historySummary.filter(f => f.result === 'UP').length;
+        const downWins = historySummary.filter(f => f.result === 'DOWN').length;
+        const flatFrames = historySummary.filter(f => f.result === 'FLAT').length;
+
+        // Average metrics
+        const avgVolPerFrame = totalFrames > 0 ? globalStats.totalVolume / totalFrames : 0;
+        const avgUsersPerFrame = totalFrames > 0 ? historySummary.reduce((sum, f) => sum + (f.users || 0), 0) / totalFrames : 0;
+
+        // Current frame status
+        const currentFrame = {
+            id: gameState.candleStartTime,
+            upShares: gameState.poolShares?.up || 50,
+            downShares: gameState.poolShares?.down || 50,
+            betsCount: gameState.bets?.length || 0,
+            totalSol: gameState.bets?.reduce((sum, b) => sum + b.costSol, 0) || 0,
+            startPrice: gameState.candleOpen,
+            currentPrice: gameState.price,
+            isPaused: gameState.isPaused
+        };
+
+        // System metrics
+        const memUsage = process.memoryUsage();
+        const uptimeSec = process.uptime();
+
+        res.json({
+            // Overview
+            overview: {
+                totalUsers,
+                totalFrames,
+                totalVolume: parseFloat(globalStats.totalVolume.toFixed(4)),
+                totalFees: parseFloat(globalStats.totalFees.toFixed(4)),
+                totalWinnings: parseFloat(globalStats.totalWinnings.toFixed(4))
+            },
+            // Today
+            today: {
+                frames: todayFrames.length,
+                volume: parseFloat(todayVolume.toFixed(4)),
+                fees: parseFloat(todayFees.toFixed(4)),
+                uniqueUsers: todayUsers
+            },
+            // Last 7 days
+            week: {
+                frames: weekFrames.length,
+                volume: parseFloat(weekVolume.toFixed(4)),
+                fees: parseFloat(weekFees.toFixed(4)),
+                avgVolumePerDay: parseFloat((weekVolume / 7).toFixed(4))
+            },
+            // Frame distribution
+            frameStats: {
+                upWins,
+                downWins,
+                flatFrames,
+                upWinRate: totalFrames > 0 ? parseFloat((upWins / totalFrames * 100).toFixed(2)) : 0,
+                downWinRate: totalFrames > 0 ? parseFloat((downWins / totalFrames * 100).toFixed(2)) : 0,
+                avgVolumePerFrame: parseFloat(avgVolPerFrame.toFixed(4)),
+                avgUsersPerFrame: parseFloat(avgUsersPerFrame.toFixed(2))
+            },
+            // Current frame
+            currentFrame,
+            // Lottery
+            lottery: {
+                round: lotteryState.currentRound,
+                pool: lotteryState.prizePool,
+                threshold: config.LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD,
+                nextDrawEligible: lotteryState.prizePool >= config.LOTTERY_CONFIG.PRIZE_POOL_THRESHOLD
+            },
+            // WebSocket
+            websocket: {
+                connectedClients: wsClients.size
+            },
+            // System
+            system: {
+                version: BACKEND_VERSION,
+                uptime: Math.floor(uptimeSec),
+                memoryMB: Math.floor(memUsage.heapUsed / 1024 / 1024),
+                payoutQueueLength: payoutQueue.length
+            }
+        });
+    } catch (e) {
+        console.error('> [ADMIN] Stats error:', e.message);
+        res.status(500).json({ error: "STATS_ERROR" });
+    }
+});
+
+// --- LOTTERY SCHEDULED TASK ---
+// Check every hour if it's time for a draw
+setInterval(checkLotterySchedule, 60 * 60 * 1000);
+// Also check on startup after a short delay
+setTimeout(checkLotterySchedule, 10000);
+
+server.listen(PORT, () => {
+    log(`> ASDForecast Engine v${BACKEND_VERSION} running on ${PORT}`, "SYS");
+    log(`> WebSocket server ready on ws://localhost:${PORT}`, "SYS");
+    loadAndInit();
+});
+
+// ===================
+// GRACEFUL SHUTDOWN
+// ===================
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    log(`\n> [SHUTDOWN] Received ${signal}. Starting graceful shutdown...`, "SYS");
+
+    // 1. Notify all WebSocket clients
+    const shutdownMsg = JSON.stringify({
+        event: 'SERVER_SHUTDOWN',
+        data: { reason: signal, message: 'Server is shutting down for maintenance' },
+        ts: Date.now()
+    });
+    for (const [ws] of wsClients) {
+        try {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(shutdownMsg);
+                ws.close(1001, 'Server shutting down');
+            }
+        } catch (e) { /* ignore */ }
+    }
+    log(`> [SHUTDOWN] Notified ${wsClients.size} WebSocket clients`, "SYS");
+
+    // 2. Stop accepting new connections
+    server.close(() => {
+        log(`> [SHUTDOWN] HTTP server closed`, "SYS");
+    });
+
+    // 3. Save current state
+    try {
+        await saveSystemState();
+        log(`> [SHUTDOWN] System state saved`, "SYS");
+    } catch (e) {
+        log(`> [SHUTDOWN] Failed to save state: ${e.message}`, "ERR");
+    }
+
+    // 4. Save lottery and referral data
+    try {
+        await saveLotteryState();
+        await saveReferralData();
+        log(`> [SHUTDOWN] Lottery & Referral data saved`, "SYS");
+    } catch (e) {
+        log(`> [SHUTDOWN] Failed to save lottery/referral: ${e.message}`, "ERR");
+    }
+
+    // 5. Wait for pending payouts (max 5 seconds)
+    if (currentQueueLength > 0) {
+        log(`> [SHUTDOWN] Waiting for ${currentQueueLength} pending payouts (max 5s)...`, "SYS");
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    // 6. Final cleanup
+    log(`> [SHUTDOWN] Graceful shutdown complete. Goodbye!`, "SYS");
+    process.exit(0);
+}
+
+// Handle termination signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions (log but don't crash immediately)
+process.on('uncaughtException', (err) => {
+    log(`> [FATAL] Uncaught Exception: ${err.message}`, "ERR");
+    console.error(err.stack);
+    gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    log(`> [FATAL] Unhandled Rejection: ${reason}`, "ERR");
+    // Don't exit, just log - many unhandled rejections are recoverable
+});

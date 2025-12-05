@@ -1,3 +1,4 @@
+<!-- ASDForecast v147.0 // UI: LOTTERY + REFERRAL + EXTERNAL TRACKING MERGE -->
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -296,6 +297,181 @@
             </div>
         </div>
 
+        <!-- LOTTERY SECTION -->
+        <div class="panel p-6 bg-black/40 mb-8 border-2 border-yellow-600">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-yellow-400">🎟️ Weekly ASDF Lottery</h3>
+                <span class="text-xs font-mono bg-yellow-900/30 px-2 py-1 rounded text-yellow-300">Round #<span id="lottery-round">--</span></span>
+            </div>
+
+            <!-- NEW: Prize Pool Progress -->
+            <div class="bg-gradient-to-r from-yellow-900/30 to-orange-900/30 p-4 rounded border border-yellow-600/50 mb-4">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-sm font-bold text-yellow-400">💰 Prize Pool</span>
+                    <span class="text-xs font-mono text-gray-400">Threshold: <span class="text-yellow-300">1,000,000 ASDF</span></span>
+                </div>
+                <div class="h-6 bg-black/50 rounded-full overflow-hidden border border-yellow-900/50 mb-2">
+                    <div id="lottery-pool-bar" class="h-full bg-gradient-to-r from-yellow-500 to-orange-500 transition-all duration-500" style="width: 0%"></div>
+                </div>
+                <div class="flex justify-between items-center text-xs font-mono">
+                    <span class="text-white"><span id="lottery-pool-amount">0</span> ASDF</span>
+                    <span id="lottery-pool-percent" class="text-yellow-400">0%</span>
+                </div>
+                <div id="lottery-pool-status" class="text-center mt-2 text-xs font-mono text-gray-500">
+                    Accumulating from platform fees...
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <!-- Next Draw -->
+                <div class="bg-black/30 p-4 rounded border border-yellow-900/50 text-center">
+                    <span class="block text-[10px] text-yellow-500 font-mono uppercase mb-1">Next Draw</span>
+                    <span id="lottery-countdown" class="text-2xl font-mono font-bold text-white">--d --h --m</span>
+                </div>
+
+                <!-- Your Tickets -->
+                <div class="bg-black/30 p-4 rounded border border-yellow-900/50 text-center">
+                    <span class="block text-[10px] text-yellow-500 font-mono uppercase mb-1">Your Tickets</span>
+                    <span id="lottery-tickets" class="text-2xl font-mono font-bold text-yellow-400">--</span>
+                    <span id="lottery-tickets-max" class="text-xs text-gray-500 block">/52 max</span>
+                    <span id="lottery-activity" class="text-[10px] text-cyan-400 block mt-1">Activity: --/7 days</span>
+                </div>
+
+                <!-- Recent Winner -->
+                <div class="bg-black/30 p-4 rounded border border-yellow-900/50 text-center">
+                    <span class="block text-[10px] text-yellow-500 font-mono uppercase mb-1">Last Winner</span>
+                    <span id="lottery-winner" class="text-lg font-mono font-bold text-green-400">--</span>
+                    <span id="lottery-prize" class="text-xs text-yellow-300 block">-- ASDF</span>
+                </div>
+            </div>
+
+            <!-- Eligibility Info -->
+            <div id="lottery-eligibility" class="bg-yellow-900/20 p-3 rounded border border-yellow-900/30 text-xs font-mono">
+                <div class="flex justify-between items-center">
+                    <span class="text-yellow-400">Eligibility:</span>
+                    <span id="lottery-status" class="text-gray-400">Connect wallet to check</span>
+                </div>
+                <div class="flex justify-between items-center mt-1 text-gray-500">
+                    <span>Required: ≥0.00552% of supply</span>
+                    <span id="lottery-threshold">-- ASDF</span>
+                </div>
+                <div id="lottery-holding-info" class="hidden mt-2 pt-2 border-t border-yellow-900/30">
+                    <div class="flex justify-between">
+                        <span class="text-yellow-400">Your Balance:</span>
+                        <span id="lottery-balance" class="text-white">-- ASDF</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-yellow-400">Weeks Holding:</span>
+                        <span id="lottery-weeks" class="text-white">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- How it works -->
+            <div class="mt-4 text-[10px] text-gray-500 font-mono">
+                <strong class="text-yellow-500">How it works:</strong> Hold ≥0.00552% ASDF + play daily for 7/7 days = 100% tickets. Base tickets = 1 + weeks holding (max 52). Activity multiplier = days active / 7. Organic & libertarian: no gaming, just play.
+            </div>
+        </div>
+
+        <!-- REFERRAL SECTION (552 SYMMETRY) -->
+        <div class="panel p-6 bg-black/40 mb-8 border-2 border-cyan-600">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-cyan-400">🔗 Referral Rewards</h3>
+                <span class="text-xs font-mono bg-cyan-900/30 px-2 py-1 rounded text-cyan-300">Earn ASDF</span>
+            </div>
+
+            <!-- Referral Code Section -->
+            <div class="bg-gradient-to-r from-cyan-900/30 to-blue-900/30 p-4 rounded border border-cyan-600/50 mb-4">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-sm font-bold text-cyan-400">📋 Your Referral Code</span>
+                    <span id="referral-code-status" class="text-xs font-mono text-gray-400">Connect wallet</span>
+                </div>
+                <div class="flex gap-2">
+                    <input type="text" id="referral-code-display" readonly
+                        class="flex-1 bg-black/50 border border-cyan-900/50 rounded px-3 py-2 font-mono text-lg text-cyan-300 text-center"
+                        value="--------" placeholder="--------">
+                    <button onclick="window.copyReferralCode()" id="copy-code-btn"
+                        class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white font-bold rounded border border-cyan-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled>Copy</button>
+                </div>
+                <div id="referral-code-message" class="text-center mt-2 text-xs font-mono text-gray-500">
+                    Hold 55,200+ ASDF to create your referral code
+                </div>
+            </div>
+
+            <!-- Pending Rewards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div class="bg-black/30 p-4 rounded border border-cyan-900/50 text-center">
+                    <span class="block text-[10px] text-cyan-500 font-mono uppercase mb-1">Pending Rewards</span>
+                    <span id="referral-pending-asdf" class="text-2xl font-mono font-bold text-cyan-400">0</span>
+                    <span class="text-xs text-gray-400 block">ASDF</span>
+                </div>
+                <div class="bg-black/30 p-4 rounded border border-cyan-900/50 text-center">
+                    <span class="block text-[10px] text-cyan-500 font-mono uppercase mb-1">Your ASDF Balance</span>
+                    <span id="referral-your-balance" class="text-2xl font-mono font-bold text-white">0</span>
+                    <span class="text-xs text-gray-400 block">ASDF</span>
+                </div>
+                <div class="bg-black/30 p-4 rounded border border-cyan-900/50 text-center">
+                    <span class="block text-[10px] text-cyan-500 font-mono uppercase mb-1">Claimable Now</span>
+                    <span id="referral-claimable" class="text-2xl font-mono font-bold text-green-400">0</span>
+                    <span class="text-xs text-gray-400 block">ASDF</span>
+                </div>
+            </div>
+
+            <!-- Claim Button -->
+            <div class="text-center mb-4">
+                <button onclick="window.claimReferralRewards()" id="claim-btn"
+                    class="px-8 py-3 bg-gradient-to-r from-green-700 to-cyan-700 hover:from-green-600 hover:to-cyan-600 text-white font-bold text-lg rounded-lg border-2 border-green-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:from-gray-700 disabled:to-gray-700 disabled:border-gray-500"
+                    disabled>
+                    <span id="claim-btn-text">Claim ASDF Rewards</span>
+                </button>
+                <div id="claim-message" class="mt-2 text-xs font-mono text-gray-500"></div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4 text-xs font-mono">
+                <div class="bg-black/20 p-2 rounded text-center">
+                    <span class="text-gray-500 block">Referred Users</span>
+                    <span id="referral-users-count" class="text-cyan-400">0</span>
+                </div>
+                <div class="bg-black/20 p-2 rounded text-center">
+                    <span class="text-gray-500 block">Volume Generated</span>
+                    <span id="referral-volume" class="text-cyan-400">0 SOL</span>
+                </div>
+                <div class="bg-black/20 p-2 rounded text-center">
+                    <span class="text-gray-500 block">Total Claimed</span>
+                    <span id="referral-total-claimed" class="text-green-400">0 ASDF</span>
+                </div>
+                <div class="bg-black/20 p-2 rounded text-center">
+                    <span class="text-gray-500 block">Referred By</span>
+                    <span id="referral-referred-by" class="text-gray-400">None</span>
+                </div>
+            </div>
+
+            <!-- Register with Code -->
+            <div id="register-section" class="bg-cyan-900/20 p-3 rounded border border-cyan-900/30 mb-4">
+                <div class="text-sm font-bold text-cyan-400 mb-2">Have a referral code?</div>
+                <div class="flex gap-2">
+                    <input type="text" id="register-code-input" maxlength="8"
+                        class="flex-1 bg-black/50 border border-cyan-900/50 rounded px-3 py-2 font-mono text-center uppercase"
+                        placeholder="ENTER CODE">
+                    <button onclick="window.registerReferralCode()" id="register-btn"
+                        class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white font-bold rounded border border-cyan-500 transition-colors disabled:opacity-50"
+                        disabled>Register</button>
+                </div>
+                <div id="register-message" class="mt-2 text-xs font-mono text-center"></div>
+            </div>
+
+            <!-- How it works -->
+            <div class="text-[10px] text-gray-500 font-mono">
+                <strong class="text-cyan-500">552 SYMMETRY:</strong>
+                <span class="text-cyan-300">You earn 0.552%</span> of your bets in ASDF.
+                <span class="text-blue-300">Referrer earns 0.448%</span> of your bets.
+                <strong class="text-yellow-400">Flywheel:</strong> You can only claim up to your ASDF balance. Hold more = claim more!
+            </div>
+        </div>
+
+        <!-- ABOUT SECTION (FULLY EXPANDED) -->
         <div class="panel p-6 bg-black/40">
             <button onclick="window.toggleAbout()" class="w-full text-left flex justify-between items-center text-orange-400 hover:text-white transition-colors"><span class="font-bold text-lg font-mono">>> METHODOLOGY & MECHANICS</span><span id="about-icon">[ + ]</span></button>
             <div id="about-content" class="hidden mt-4 text-sm text-orange-200/80 font-mono space-y-6 border-t border-orange-900/50 pt-4">
@@ -310,8 +486,9 @@
         <div class="text-center text-xs text-gray-500 font-mono pt-2 border-t border-orange-900/50"><span class="text-orange-400">Frontend v126.5</span> | Backend <span id="backend-version">v---</span></div>
     </div>
 
-    <div id="share-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black/60">
-        <div class="share-card relative">
+    <!-- SHARE MODAL -->
+    <div id="share-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black/60" onclick="if(event.target === this) this.classList.add('hidden')">
+        <div class="share-card relative" onclick="event.stopPropagation()">
             <button onclick="document.getElementById('share-modal').classList.add('hidden')" class="absolute top-2 right-3 text-gray-400 hover:text-white">✕</button>
             <h2 class="text-xl font-bold text-orange-500 mb-4">FLEX YOUR DEGEN STATS</h2>
             <img id="share-preview" src="" alt="Stats Card">
@@ -322,8 +499,9 @@
         </div>
     </div>
 
-    <div id="history-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black/80 backdrop-blur-sm">
-        <div class="history-card flex flex-col">
+    <!-- HISTORY MODAL -->
+    <div id="history-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black/80 backdrop-blur-sm" onclick="if(event.target === this) this.classList.add('hidden')">
+        <div class="history-card flex flex-col" onclick="event.stopPropagation()">
             <div class="p-4 border-b border-orange-900/50 flex justify-between items-center bg-[#1d120e]">
                 <div>
                     <h2 class="text-xl font-bold text-white">FRAME HISTORY</h2>
@@ -360,7 +538,12 @@
 
 <script>
     const HOUSE_PUBKEY = "BXSp5y6Ua6tB5fZDe1EscVaaEaZLg1yqzrsPqAXhKJYy"; // MAINNET WALLET
-    const API_URL = 'https://asdforecast.onrender.com/api'; 
+    const IS_LOCAL = ['localhost', '127.0.0.1'].includes(window.location.hostname) || window.location.hostname.includes('github.dev');
+    const API_URL = IS_LOCAL
+        ? (window.location.hostname.includes('github.dev')
+            ? window.location.origin.replace('-8080.', '-3000.') + '/api'
+            : 'http://localhost:3000/api')
+        : 'https://asdforecast.onrender.com/api'; 
     // SECURITY NOTE: This key is visible to the client. Restrict origin in Helius Dashboard!
     const HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=3ce79dab-c031-4ebe-a060-edc91bf0edee";
     
@@ -369,6 +552,11 @@
     let ui = {};
     let pollTimeout = null; // Store market data timeout ID for cleanup
     let balanceIntervalId = null; // NEW: Store balance interval ID
+
+    // WebSocket for real-time updates
+    let ws = null;
+    let wsReconnectAttempts = 0;
+    const WS_RECONNECT_MAX_DELAY = 30000; // 30s max backoff
 
     window.addEventListener('load', () => {
         if (window.solanaWeb3) {
@@ -394,7 +582,7 @@
             costUp: document.getElementById('cost-up'), costDown: document.getElementById('cost-down'),
             bal: document.getElementById('balance'), form: document.getElementById('order-form'),
             connect: document.getElementById('connect-btn'), disconnect: document.getElementById('disconnect-btn'),
-            historyRows: document.getElementById('history-rows'), historyContainer: document.getElementById('history-container'), btnExpand: document.getElementById('btn-expand-history'),
+            historyRows: document.getElementById('history-rows'), historyContainer: document.getElementById('history-container'),
             statsContainer: document.getElementById('user-stats-container'), statWin: document.getElementById('stat-winrate'), statVol: document.getElementById('stat-volume'),
             statActUp: document.getElementById('stat-active-up'), statActDown: document.getElementById('stat-active-down'),
             statActUpSol: document.getElementById('stat-active-up-sol'), // ADDED
@@ -423,27 +611,62 @@
             globalLastPayout: document.getElementById('link-last-payout'), 
             globalWinnings: document.getElementById('global-winnings'),
             globalLifetimeUsers: document.getElementById('global-lifetime-users'),
-            
+
+            // LOTTERY UI ELEMENTS
+            lotteryRound: document.getElementById('lottery-round'),
+            lotteryCountdown: document.getElementById('lottery-countdown'),
+            lotteryTickets: document.getElementById('lottery-tickets'),
+            lotteryActivity: document.getElementById('lottery-activity'),
+            lotteryWinner: document.getElementById('lottery-winner'),
+            lotteryPrize: document.getElementById('lottery-prize'),
+            lotteryStatus: document.getElementById('lottery-status'),
+            lotteryThreshold: document.getElementById('lottery-threshold'),
+            lotteryHoldingInfo: document.getElementById('lottery-holding-info'),
+            lotteryBalance: document.getElementById('lottery-balance'),
+            lotteryWeeks: document.getElementById('lottery-weeks'),
+            // NEW: Prize Pool UI
+            lotteryPoolBar: document.getElementById('lottery-pool-bar'),
+            lotteryPoolAmount: document.getElementById('lottery-pool-amount'),
+            lotteryPoolPercent: document.getElementById('lottery-pool-percent'),
+            lotteryPoolStatus: document.getElementById('lottery-pool-status'),
+            // SENTIMENT UI ELEMENTS
             broadcastContainer: document.getElementById('admin-broadcast-container'),
             broadcastText: document.getElementById('broadcast-text'),
-            
-            // HISTORY MODAL
-            publicHistoryRows: document.getElementById('public-history-rows'),
-            publicHistorySearch: document.getElementById('public-history-search'),
-
-            // NEW SENTIMENT UI
+            sentTimer: document.getElementById('sent-timer'),
             sentBarFill: document.getElementById('sent-bar-fill'),
             valSentUp: document.getElementById('val-sent-up'),
             valSentDown: document.getElementById('val-sent-down'),
             btnSentUp: document.getElementById('btn-sent-up'),
             btnSentDown: document.getElementById('btn-sent-down'),
+            // PUBLIC HISTORY MODAL
+            publicHistoryRows: document.getElementById('public-history-rows'),
+            publicHistorySearch: document.getElementById('public-history-search'),
+            // SENTIMENT IMAGES
             imgSentUp: document.getElementById('img-sent-up'),
             imgSentDown: document.getElementById('img-sent-down'),
             sentTimer: document.getElementById('sent-timer'),
-
-            // ABOUT TOGGLE 
+            // ABOUT TOGGLE
             aboutContent: document.getElementById('about-content'),
-            aboutIcon: document.getElementById('about-icon')
+            aboutIcon: document.getElementById('about-icon'),
+            // REFERRAL UI ELEMENTS
+            referralCodeDisplay: document.getElementById('referral-code-display'),
+            referralCodeStatus: document.getElementById('referral-code-status'),
+            referralCodeMessage: document.getElementById('referral-code-message'),
+            copyCodeBtn: document.getElementById('copy-code-btn'),
+            referralPendingAsdf: document.getElementById('referral-pending-asdf'),
+            referralYourBalance: document.getElementById('referral-your-balance'),
+            referralClaimable: document.getElementById('referral-claimable'),
+            claimBtn: document.getElementById('claim-btn'),
+            claimBtnText: document.getElementById('claim-btn-text'),
+            claimMessage: document.getElementById('claim-message'),
+            referralUsersCount: document.getElementById('referral-users-count'),
+            referralVolume: document.getElementById('referral-volume'),
+            referralTotalClaimed: document.getElementById('referral-total-claimed'),
+            referralReferredBy: document.getElementById('referral-referred-by'),
+            registerSection: document.getElementById('register-section'),
+            registerCodeInput: document.getElementById('register-code-input'),
+            registerBtn: document.getElementById('register-btn'),
+            registerMessage: document.getElementById('register-message')
         };
 
         if(ui.btnInc) ui.btnInc.onclick = () => adjustQty(1);
@@ -457,7 +680,6 @@
         // Fetch Images immediately
         fetch(`${API_URL}/api/image/fine`).then(r=>r.json()).then(d=>{ if(d.image) state.images.fine = d.image; });
         fetch(`${API_URL}/api/image/over`).then(r=>r.json()).then(d=>{ if(d.image) state.images.over = d.image; });
-        // NEW SENTIMENT IMAGES (Fixed to assign to state)
         fetch(`${API_URL}/api/image/sentiment-up`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentUp) { ui.imgSentUp.src = d.image; state.images.sentUp = d.image; } });
         fetch(`${API_URL}/api/image/sentiment-down`).then(r=>r.json()).then(d=>{ if(d.image && ui.imgSentDown) { ui.imgSentDown.src = d.image; state.images.sentDown = d.image; } });
 
@@ -472,8 +694,18 @@
             }
         });
 
+        // ESCAPE KEY TO CLOSE MODALS
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.getElementById('history-modal')?.classList.add('hidden');
+                document.getElementById('share-modal')?.classList.add('hidden');
+            }
+        });
+
         // Start polling initially
-        poll(); 
+        poll();
+        // Initialize WebSocket for real-time updates
+        initWebSocket();
         setInterval(updateTimer, 1000);
         setTimeout(() => { if(window.solana?.isPhantom) window.solana.connect({onlyIfTrusted:true}).then(onConnect).catch(()=>{}); }, 500);
     });
@@ -506,7 +738,7 @@
         btn.disabled = true; // Immediate visual feedback
         
         try {
-            const res = await fetch(`${API_URL}/api/sentiment/vote`, {
+            const res = await fetch(`${API_URL}/sentiment/vote`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ direction: dir, userPubKey: state.pubKey.toString() })
@@ -600,96 +832,82 @@
     };
 
     async function connect() { try { await window.solana.connect(); onConnect(await window.solana.connect()); } catch(e){} }
-    async function disconnectWallet() { 
-        if(window.solana) await window.solana.disconnect(); 
-        stopBalancePolling(); // NEW: Stop polling when disconnecting
-        state.pubKey = null; 
-        state.solBalance = 0; // RESET BALANCE
-        state.userLog = {}; 
-        ui.connect.innerText = "Connect Phantom"; 
-        ui.form.classList.add('opacity-50', 'pointer-events-none'); 
-        ui.disconnect.classList.add('hidden'); 
-        ui.bal.innerText = "0.0000"; 
-        ui.statsContainer.classList.add('hidden'); 
-        renderHistory(); 
-        updateCosts(); // Update costs to reflect zero balance
+    async function disconnectWallet() {
+        if(window.solana) await window.solana.disconnect();
+        stopBalancePolling();
+        state.pubKey = null;
+        state.solBalance = 0;
+        state.userLog = {};
+        ui.connect.innerText = "Connect Phantom";
+        ui.form.classList.add('opacity-50', 'pointer-events-none');
+        ui.disconnect.classList.add('hidden');
+        ui.bal.innerText = "0.0000";
+        ui.statsContainer.classList.add('hidden');
+        renderHistory();
+        updateCosts();
+        if(lotteryEligibilityInterval) { clearInterval(lotteryEligibilityInterval); lotteryEligibilityInterval = null; }
+        if(referralStatsInterval) { clearInterval(referralStatsInterval); referralStatsInterval = null; }
+        fetchLotteryEligibility();
+        fetchReferralStats();
     }
-    function onConnect(resp) { 
-        state.pubKey = resp.publicKey; 
-        ui.connect.innerText = `👤 ${resp.publicKey.toString().slice(0,4)}...`; 
-        ui.form.classList.remove('opacity-50', 'pointer-events-none'); 
-        ui.disconnect.classList.remove('hidden'); 
-        startBalancePolling(); // NEW: Start periodic balance check
-        poll(); 
+    function onConnect(resp) {
+        state.pubKey = resp.publicKey;
+        ui.connect.innerText = `👤 ${resp.publicKey.toString().slice(0,4)}...`;
+        ui.form.classList.remove('opacity-50', 'pointer-events-none');
+        ui.disconnect.classList.remove('hidden');
+        startBalancePolling();
+        poll();
+        startLotteryEligibilityPolling();
+        startReferralPolling();
+        // Authenticate WebSocket with new pubKey
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'AUTH', pubKey: resp.publicKey.toString() }));
+        }
     }
-
-    // UPDATED: Now stores balance in state.solBalance and calls updateCosts
-    async function refreshBalance() { 
-        if(state.pubKey) { 
+    async function refreshBalance() {
+        if(state.pubKey) {
             try {
-                const bal = await state.conn.getBalance(state.pubKey); 
-                state.solBalance = bal / 1e9; // Store balance in SOL
-                ui.bal.innerText = state.solBalance.toFixed(4); 
-                updateCosts(); // Call updateCosts after updating balance
+                const bal = await state.conn.getBalance(state.pubKey);
+                state.solBalance = bal / 1e9;
+                ui.bal.innerText = state.solBalance.toFixed(4);
+                updateCosts();
             } catch (e) {
                 console.error("Failed to refresh balance:", e);
-                // If fetching balance fails, don't update state.solBalance, but still update costs
                 updateCosts();
             }
-        } 
+        }
     }
-    
-    function adjustQty(n) { 
+    function adjustQty(n) {
         if(ui.qty.disabled) {
             alert("Cannot adjust quantity while market is paused or calculating results.");
             return;
         }
-        let v = parseInt(ui.qty.value) + n; 
-        if(v < 1) v = 1; 
-        ui.qty.value = Math.floor(v); 
-        updateCosts(); 
+        let v = parseInt(ui.qty.value) + n;
+        if(v < 1) v = 1;
+        ui.qty.value = Math.floor(v);
+        updateCosts();
     }
-    
-    // UPDATED: Now performs balance validation and disables buttons
-    function updateCosts() { 
-        const q = parseInt(ui.qty.value) || 0; 
-        
-        if(state.prices.up && ui.costUp) { 
+    function updateCosts() {
+        const q = parseInt(ui.qty.value) || 0;
+        if(state.prices.up && ui.costUp) {
             const costUp = q * state.prices.up;
             const costDown = q * state.prices.down;
-            
-            ui.costUp.innerText = costUp.toFixed(3) + " SOL"; 
-            ui.costDown.innerText = costDown.toFixed(3) + " SOL"; 
-            
-            // Logic to disable input/buttons based on market state
-            // isMarketOpen is true if any blocking state is active, OR if the user is not connected
+            ui.costUp.innerText = costUp.toFixed(3) + " SOL";
+            ui.costDown.innerText = costDown.toFixed(3) + " SOL";
             const isMarketBlocking = state.isResetting || state.isCancelled || state.isPaused || (state.targetEndTime && state.targetEndTime <= Date.now() + 500);
             const isConnected = !!state.pubKey;
-            
-            const isMarketOpen = !(isConnected && !isMarketBlocking);
-
-
-            // Disable/Enable Quantity Controls (qty input and + / - buttons)
-            // The quantity controls should be disabled if the market is blocking OR if the user is disconnected
             ui.qty.disabled = isMarketBlocking || !isConnected;
             ui.btnInc.disabled = isMarketBlocking || !isConnected;
             ui.btnDec.disabled = isMarketBlocking || !isConnected;
-
-            // Balance Validation
             const hasUpFunds = costUp <= state.solBalance;
             const hasDownFunds = costDown <= state.solBalance;
-            
-            // Disable Buy Buttons: combines Market State AND Insufficient Funds AND Disconnected State
             ui.btnUp.disabled = isMarketBlocking || !hasUpFunds || !isConnected;
             ui.btnDown.disabled = isMarketBlocking || !hasDownFunds || !isConnected;
-
-            // Visual feedback for insufficient funds
             if (!hasUpFunds) { ui.costUp.classList.add('text-red-500'); ui.costUp.classList.remove('text-green-300'); }
             else { ui.costUp.classList.remove('text-red-500'); ui.costUp.classList.add('text-green-300'); }
-            
             if (!hasDownFunds) { ui.costDown.classList.add('text-red-500'); ui.costDown.classList.remove('text-red-300'); }
             else { ui.costDown.classList.remove('text-red-500'); ui.costDown.classList.add('text-red-300'); }
-        } 
+        }
     }
 
     // --- SHARE STATS LOGIC (UPDATED) ---
@@ -779,6 +997,362 @@
         `).join('');
     }
 
+    // --- LOTTERY FUNCTIONS ---
+    function formatLotteryCountdown(ms) {
+        if (ms <= 0) return "Drawing...";
+        const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+        const hours = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+        const mins = Math.floor((ms % (60 * 60 * 1000)) / (60 * 1000));
+        if (days > 0) return `${days}d ${hours}h ${mins}m`;
+        if (hours > 0) return `${hours}h ${mins}m`;
+        return `${mins}m`;
+    }
+
+    function updateLotteryUI(lotteryData) {
+        if (!lotteryData || !ui.lotteryRound) return;
+
+        // Update round and countdown from cached state data
+        ui.lotteryRound.innerText = lotteryData.currentRound || '--';
+
+        // Update countdown based on threshold status
+        if (lotteryData.isThresholdReached) {
+            ui.lotteryCountdown.innerText = formatLotteryCountdown(lotteryData.msUntilDraw || 0);
+        } else {
+            ui.lotteryCountdown.innerText = 'Waiting for pool...';
+            ui.lotteryCountdown.classList.add('text-gray-500');
+        }
+
+        // Update recent winner
+        if (lotteryData.recentWinner) {
+            ui.lotteryWinner.innerText = lotteryData.recentWinner.slice(0, 6) + '...';
+            ui.lotteryPrize.innerText = (lotteryData.recentPrize || 0).toLocaleString() + ' ASDF';
+        } else {
+            ui.lotteryWinner.innerText = 'No draws yet';
+            ui.lotteryPrize.innerText = '--';
+        }
+
+        // NEW: Update Prize Pool Progress
+        if (ui.lotteryPoolBar) {
+            const poolAmount = lotteryData.prizePool || 0;
+            const poolPercent = lotteryData.prizePoolPercent || 0;
+            const isReady = lotteryData.isThresholdReached;
+
+            ui.lotteryPoolBar.style.width = `${poolPercent}%`;
+            ui.lotteryPoolAmount.innerText = poolAmount.toLocaleString();
+            ui.lotteryPoolPercent.innerText = poolPercent.toFixed(2) + '%';
+
+            if (isReady) {
+                ui.lotteryPoolBar.classList.remove('from-yellow-500', 'to-orange-500');
+                ui.lotteryPoolBar.classList.add('from-green-500', 'to-emerald-500');
+                ui.lotteryPoolStatus.innerHTML = '🎉 <span class="text-green-400 font-bold">THRESHOLD REACHED!</span> Draw will occur at next scheduled time.';
+            } else {
+                ui.lotteryPoolBar.classList.remove('from-green-500', 'to-emerald-500');
+                ui.lotteryPoolBar.classList.add('from-yellow-500', 'to-orange-500');
+                const remaining = (lotteryData.prizePoolThreshold || 1000000) - poolAmount;
+                ui.lotteryPoolStatus.innerText = `${remaining.toLocaleString()} ASDF remaining to unlock lottery`;
+            }
+        }
+    }
+
+    async function fetchLotteryEligibility() {
+        if (!state.pubKey) {
+            ui.lotteryStatus.innerText = 'Connect wallet to check';
+            ui.lotteryStatus.className = 'text-gray-400';
+            ui.lotteryTickets.innerText = '--';
+            ui.lotteryActivity.innerText = 'Activity: --/7 days';
+            ui.lotteryHoldingInfo.classList.add('hidden');
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API_URL}/lottery/eligibility?user=${state.pubKey.toString()}`);
+            if (!res.ok) throw new Error('Failed to fetch eligibility');
+            const data = await res.json();
+
+            // Update threshold
+            ui.lotteryThreshold.innerText = Math.round(data.threshold).toLocaleString() + ' ASDF';
+
+            // Update tickets (effective tickets with activity multiplier applied)
+            ui.lotteryTickets.innerText = data.tickets || 0;
+
+            // Update activity display
+            const activeDays = data.activeDays || 0;
+            const windowDays = data.activityWindowDays || 7;
+            const multiplier = data.activityMultiplier || 0;
+            ui.lotteryActivity.innerText = `Activity: ${activeDays}/${windowDays} days (${Math.round(multiplier * 100)}%)`;
+
+            // Color code activity
+            if (activeDays >= windowDays) {
+                ui.lotteryActivity.className = 'text-[10px] text-green-400 block mt-1';
+            } else if (activeDays > 0) {
+                ui.lotteryActivity.className = 'text-[10px] text-yellow-400 block mt-1';
+            } else {
+                ui.lotteryActivity.className = 'text-[10px] text-red-400 block mt-1';
+            }
+
+            // Update eligibility status
+            if (data.isEligible && data.tickets > 0) {
+                ui.lotteryStatus.innerText = 'ELIGIBLE';
+                ui.lotteryStatus.className = 'text-green-400 font-bold';
+            } else if (data.isEligible && data.tickets === 0) {
+                ui.lotteryStatus.innerText = 'NEED ACTIVITY';
+                ui.lotteryStatus.className = 'text-yellow-400';
+            } else {
+                ui.lotteryStatus.innerText = 'NOT ELIGIBLE';
+                ui.lotteryStatus.className = 'text-red-400';
+            }
+
+            // Show holding info
+            ui.lotteryHoldingInfo.classList.remove('hidden');
+            ui.lotteryBalance.innerText = Math.round(data.balance).toLocaleString() + ' ASDF';
+            ui.lotteryWeeks.innerText = data.weeksHolding || 0;
+
+        } catch (e) {
+            console.error('Lottery eligibility error:', e);
+            ui.lotteryStatus.innerText = 'Error checking';
+            ui.lotteryStatus.className = 'text-red-400';
+        }
+    }
+
+    // Fetch eligibility periodically (every 60 seconds) when wallet connected
+    let lotteryEligibilityInterval = null;
+    function startLotteryEligibilityPolling() {
+        if (lotteryEligibilityInterval) clearInterval(lotteryEligibilityInterval);
+        fetchLotteryEligibility();
+        lotteryEligibilityInterval = setInterval(fetchLotteryEligibility, 60000);
+    }
+
+    // ==================== REFERRAL SYSTEM ====================
+    let referralStatsInterval = null;
+
+    async function fetchReferralStats() {
+        if (!state.pubKey) {
+            // Reset UI to disconnected state
+            if (ui.referralCodeDisplay) ui.referralCodeDisplay.value = '--------';
+            if (ui.referralCodeStatus) ui.referralCodeStatus.innerText = 'Connect wallet';
+            if (ui.referralCodeMessage) ui.referralCodeMessage.innerText = 'Hold 55,200+ ASDF to create your referral code';
+            if (ui.copyCodeBtn) ui.copyCodeBtn.disabled = true;
+            if (ui.referralPendingAsdf) ui.referralPendingAsdf.innerText = '0';
+            if (ui.referralYourBalance) ui.referralYourBalance.innerText = '0';
+            if (ui.referralClaimable) ui.referralClaimable.innerText = '0';
+            if (ui.claimBtn) ui.claimBtn.disabled = true;
+            if (ui.registerBtn) ui.registerBtn.disabled = true;
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API_URL}/referral/stats?user=${state.pubKey.toString()}`);
+            if (!res.ok) throw new Error('Failed to fetch referral stats');
+            const data = await res.json();
+
+            // Extract data from nested structure
+            const asdfBalance = data.claim?.userASDF_Balance || 0;
+            const canCreateCode = asdfBalance >= (data.minASDF || 55200);
+
+            // Update code section
+            if (data.referralCode) {
+                ui.referralCodeDisplay.value = data.referralCode;
+                ui.referralCodeStatus.innerText = '✅ Active';
+                ui.referralCodeStatus.className = 'text-xs font-mono text-green-400';
+                ui.referralCodeMessage.innerText = `Share to earn 0.448% of referrals' bets`;
+                ui.copyCodeBtn.disabled = false;
+            } else if (canCreateCode) {
+                ui.referralCodeDisplay.value = '--------';
+                ui.referralCodeStatus.innerText = 'Click to create';
+                ui.referralCodeStatus.className = 'text-xs font-mono text-yellow-400';
+                ui.referralCodeMessage.innerHTML = `<button onclick="window.createReferralCode()" class="underline text-cyan-400 hover:text-cyan-300">Click here to create your referral code</button>`;
+                ui.copyCodeBtn.disabled = true;
+            } else {
+                ui.referralCodeDisplay.value = '--------';
+                ui.referralCodeStatus.innerText = 'Need 55,200 ASDF';
+                ui.referralCodeStatus.className = 'text-xs font-mono text-red-400';
+                const needed = (data.minASDF || 55200) - asdfBalance;
+                ui.referralCodeMessage.innerText = `Hold ${Math.ceil(needed).toLocaleString()} more ASDF to unlock`;
+                ui.copyCodeBtn.disabled = true;
+            }
+
+            // Update rewards display (from nested structure)
+            const pendingAsdf = data.pending?.totalASDF || 0;
+            const claimable = data.claim?.claimableASDF || 0;
+
+            ui.referralPendingAsdf.innerText = pendingAsdf.toLocaleString();
+            ui.referralYourBalance.innerText = asdfBalance.toLocaleString();
+            ui.referralClaimable.innerText = claimable.toLocaleString();
+
+            // Update claim button
+            if (claimable > 0) {
+                ui.claimBtn.disabled = false;
+                ui.claimBtnText.innerText = `Claim ${claimable.toLocaleString()} ASDF`;
+                ui.claimMessage.innerText = '';
+            } else if (pendingAsdf > 0 && asdfBalance < pendingAsdf) {
+                ui.claimBtn.disabled = true;
+                ui.claimBtnText.innerText = 'Claim ASDF Rewards';
+                ui.claimMessage.innerHTML = `<span class="text-yellow-400">Hold more ASDF to claim! Need: ${(pendingAsdf - asdfBalance).toLocaleString()} more</span>`;
+            } else {
+                ui.claimBtn.disabled = true;
+                ui.claimBtnText.innerText = 'Claim ASDF Rewards';
+                ui.claimMessage.innerText = 'No pending rewards';
+            }
+
+            // Update stats
+            ui.referralUsersCount.innerText = data.referredUsers || 0;
+            ui.referralVolume.innerText = `${(data.totalVolumeGenerated || 0).toFixed(2)} SOL`;
+            ui.referralTotalClaimed.innerText = `${(data.pending?.totalClaimedASDF || 0).toLocaleString()} ASDF`;
+
+            // Update referred by
+            if (data.referredBy) {
+                ui.referralReferredBy.innerText = data.referredBy;
+                ui.referralReferredBy.className = 'text-cyan-400';
+                ui.registerSection.classList.add('hidden');
+            } else {
+                ui.referralReferredBy.innerText = 'None';
+                ui.referralReferredBy.className = 'text-gray-400';
+                ui.registerSection.classList.remove('hidden');
+                ui.registerBtn.disabled = false;
+            }
+
+        } catch (e) {
+            console.error('Referral stats error:', e);
+        }
+    }
+
+    function startReferralPolling() {
+        if (referralStatsInterval) clearInterval(referralStatsInterval);
+        fetchReferralStats();
+        referralStatsInterval = setInterval(fetchReferralStats, 30000); // Every 30s
+    }
+
+    // Copy referral code to clipboard
+    window.copyReferralCode = async function() {
+        const code = ui.referralCodeDisplay.value;
+        if (!code || code === '--------') return;
+
+        try {
+            await navigator.clipboard.writeText(code);
+            const originalText = ui.copyCodeBtn.innerText;
+            ui.copyCodeBtn.innerText = 'Copied!';
+            ui.copyCodeBtn.classList.add('bg-green-700');
+            setTimeout(() => {
+                ui.copyCodeBtn.innerText = originalText;
+                ui.copyCodeBtn.classList.remove('bg-green-700');
+            }, 2000);
+        } catch (e) {
+            alert('Failed to copy. Code: ' + code);
+        }
+    };
+
+    // Create referral code (GET endpoint auto-creates if eligible)
+    window.createReferralCode = async function() {
+        if (!state.pubKey) {
+            alert('Please connect your wallet first');
+            return;
+        }
+
+        try {
+            ui.referralCodeMessage.innerText = 'Creating code...';
+            const res = await fetch(`${API_URL}/referral/code?user=${state.pubKey.toString()}`);
+            const data = await res.json();
+
+            if (data.code) {
+                ui.referralCodeDisplay.value = data.code;
+                ui.referralCodeStatus.innerText = '✅ Active';
+                ui.referralCodeStatus.className = 'text-xs font-mono text-green-400';
+                ui.referralCodeMessage.innerText = data.isNew ? 'Code created! Share to earn rewards.' : 'Your code is ready!';
+                ui.copyCodeBtn.disabled = false;
+                fetchReferralStats();
+            } else if (data.error === 'INSUFFICIENT_ASDF') {
+                ui.referralCodeMessage.innerHTML = `<span class="text-red-400">Need ${data.required?.toLocaleString() || '55,200'} ASDF (you have ${data.current?.toLocaleString() || 0})</span>`;
+            } else {
+                ui.referralCodeMessage.innerHTML = `<span class="text-red-400">${data.error || 'Failed to create code'}</span>`;
+            }
+        } catch (e) {
+            console.error('Create code error:', e);
+            ui.referralCodeMessage.innerHTML = `<span class="text-red-400">Error creating code</span>`;
+        }
+    };
+
+    // Register with a referral code
+    window.registerReferralCode = async function() {
+        if (!state.pubKey) {
+            alert('Please connect your wallet first');
+            return;
+        }
+
+        const code = ui.registerCodeInput.value.trim().toUpperCase();
+        if (!code || code.length !== 8) {
+            ui.registerMessage.innerHTML = '<span class="text-red-400">Please enter a valid 8-character code</span>';
+            return;
+        }
+
+        try {
+            ui.registerBtn.disabled = true;
+            ui.registerMessage.innerText = 'Registering...';
+
+            const res = await fetch(`${API_URL}/referral/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: state.pubKey.toString(),
+                    code: code
+                })
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                ui.registerMessage.innerHTML = '<span class="text-green-400">✅ Successfully registered!</span>';
+                ui.registerSection.classList.add('hidden');
+                fetchReferralStats();
+            } else {
+                ui.registerMessage.innerHTML = `<span class="text-red-400">${data.error || 'Registration failed'}</span>`;
+                ui.registerBtn.disabled = false;
+            }
+        } catch (e) {
+            console.error('Register error:', e);
+            ui.registerMessage.innerHTML = `<span class="text-red-400">Error registering code</span>`;
+            ui.registerBtn.disabled = false;
+        }
+    };
+
+    // Claim referral rewards
+    window.claimReferralRewards = async function() {
+        if (!state.pubKey) {
+            alert('Please connect your wallet first');
+            return;
+        }
+
+        try {
+            ui.claimBtn.disabled = true;
+            ui.claimBtnText.innerText = 'Claiming...';
+            ui.claimMessage.innerText = '';
+
+            const res = await fetch(`${API_URL}/referral/claim`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user: state.pubKey.toString() })
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                const claimed = Math.round(data.claimedASDF || 0);
+                ui.claimMessage.innerHTML = `<span class="text-green-400">✅ Claimed ${claimed.toLocaleString()} ASDF!</span>`;
+                if (data.txSignature) {
+                    ui.claimMessage.innerHTML += ` <a href="https://solscan.io/tx/${data.txSignature}" target="_blank" class="underline text-cyan-400">View TX</a>`;
+                }
+                // Refresh stats
+                setTimeout(fetchReferralStats, 2000);
+            } else {
+                ui.claimMessage.innerHTML = `<span class="text-red-400">${data.error || 'Claim failed'}</span>`;
+            }
+        } catch (e) {
+            console.error('Claim error:', e);
+            ui.claimMessage.innerHTML = `<span class="text-red-400">Error claiming rewards</span>`;
+        } finally {
+            ui.claimBtnText.innerText = 'Claim ASDF Rewards';
+            fetchReferralStats();
+        }
+    };
+    // ==================== END REFERRAL SYSTEM ====================
+
     async function poll() {
         // Prevent polling if tab hidden (redundant check for safety)
         if (document.hidden) return;
@@ -862,12 +1436,12 @@
                     ui.barUp.style.width = `${(nU/total)*100}%`; ui.barDown.style.width = `${(nD/total)*100}%`;
                     ui.lblPriceUp.innerText = state.prices.up.toFixed(3); ui.lblPriceDown.innerText = state.prices.down.toFixed(3);
                 }
-                
+
                 ui.price.innerText = `$${data.price.toFixed(2)}`;
                 const diff = data.price - data.openPrice;
                 const color = diff >= 0 ? 'text-green-400' : 'text-red-500';
                 ui.change.innerHTML = `<span class="${color}">${diff>=0?'+':''}${diff.toFixed(2)} (${data.change.toFixed(2)}%)</span>`;
-                
+
                 if(data.candleStartTime) {
                      ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
                      ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
@@ -879,7 +1453,7 @@
                 if(data.currentVolume !== undefined) ui.currentPot.innerText = `${data.currentVolume.toFixed(3)} SOL`;
 
                 state.fullHistory = data.history || [];
-                
+
                 // UPDATE: Fill new stats fields with Fallbacks
                 if(data.platformStats) {
                     // RESTORED OLD STATS (Fixes Ghost Element Bug)
@@ -888,12 +1462,12 @@
                     if (ui.statGlobalFees) ui.statGlobalFees.innerText = `${(data.platformStats.totalFees || 0).toFixed(3)} SOL`;
                     if (ui.statGlobalASDF) ui.statGlobalASDF.innerText = Math.round(data.platformStats.totalASDF || 0).toLocaleString() + " ASDF";
                 }
-                
+
                 // New Fields
                 if (data.uniqueUsers !== undefined) ui.frameUsers.innerText = data.uniqueUsers;
                 if (data.totalLifetimeUsers) ui.globalLifetimeUsers.innerText = data.totalLifetimeUsers.toLocaleString();
                 if (data.totalWinnings !== undefined) ui.globalWinnings.innerText = `${data.totalWinnings.toFixed(2)} SOL`;
-                
+
                 if (data.lastFramePot !== undefined) {
                     const statusIcon = data.payoutQueueLength === 0 ? "✅" : "⏳";
                     // Using innerText preserves the styling of the anchor tag
@@ -910,7 +1484,10 @@
                 // RE-ADD LEADERBOARD LOGIC - ENSURE IT CALLS
                 if(data.leaderboard) renderLeaderboard(data.leaderboard);
                 if(data.recentTrades) renderTicker(data.recentTrades);
-                
+
+                // Lottery UI Update (from feature branch)
+                if(data.lottery) updateLotteryUI(data.lottery);
+
                 // UPDATE: SENTIMENT UI (POLLING)
                 if (data.hourlySentiment) {
                     const sUp = data.hourlySentiment.up;
@@ -918,11 +1495,11 @@
                     const sTotal = sUp + sDown || 1;
                     ui.valSentUp.innerText = sUp;
                     ui.valSentDown.innerText = sDown;
-                    
+
                     // FIX: Progress Bar Calculation
                     const upPercent = sTotal > 0 ? (sUp / sTotal) * 100 : 50;
                     ui.sentBarFill.style.width = `${upPercent}%`;
-                    
+
                     if (sUp > sDown) { ui.sentBarFill.style.backgroundColor = '#22c55e'; }
                     else if (sDown > sUp) { ui.sentBarFill.style.backgroundColor = '#ef4444'; }
                     else { ui.sentBarFill.style.backgroundColor = '#fb923c'; }
@@ -939,7 +1516,7 @@
                          ui.sentTimer.innerText = `Resetting...`;
                     }
                 }
-                
+
                 // FIX: Image Population
                 if (state.images.sentUp) ui.imgSentUp.src = state.images.sentUp; else ui.imgSentUp.style.display='none';
                 if (state.images.sentDown) ui.imgSentDown.src = state.images.sentDown; else ui.imgSentDown.style.display='none';
@@ -952,7 +1529,7 @@
                     const rate = total > 0 ? ((data.userStats.wins/total)*100).toFixed(0) : 0;
                     ui.statWin.innerText = `${rate}% (${data.userStats.wins}/${total})`;
                     ui.statVol.innerText = `${data.userStats.totalSol.toFixed(3)} SOL`;
-                    
+
                     // LAST FRAME PERF (Check if Closed)
                     if (state.fullHistory.length > 0) {
                         const last = state.fullHistory[0];
@@ -963,7 +1540,7 @@
                              if (log.result === 'CANCELLED') res = `<span class="text-yellow-500">REFUNDED</span>`;
                              // UPDATE: Check for Refunded Error
                              if (log.result === 'REFUNDED_ERROR') res = `<span class="text-yellow-500 font-bold">⚠️ REFUNDED</span>`;
-                             
+
                              // TEXT UPDATE
                              // UPDATE: Change "Vol" to "My Wager"
                              ui.lastFrameStats.innerHTML = `
@@ -973,16 +1550,16 @@
                                 </div>
                                 <div class="flex justify-between border-t border-white/10 mt-1 pt-1"><span>Result:</span> ${res}</div>
                              `;
-                             
+
                              // IMAGE UPDATE removed by request
 
-                        } else { 
+                        } else {
                             // FIX: If user is connected but hasn't played or frame is active/pending close
-                            ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`; 
+                            ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for close...</span>`;
                         }
                     } else {
                          // User is connected, but no history data yet
-                         ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for first game...</span>`; 
+                         ui.lastFrameStats.innerHTML = `<span class="italic opacity-50">Waiting for first game...</span>`;
                     }
                 }
                 renderHistory();
@@ -998,10 +1575,10 @@
                     // CORRECTED FORMAT: Assign Shares and SOL to their respective, mapped elements
                     if (ui.statActUp) ui.statActUp.innerText = Math.round(uS);
                     if (ui.statActUpSol) ui.statActUpSol.innerText = `(${uV.toFixed(2)} SOL)`;
-                    
+
                     if (ui.statActDown) ui.statActDown.innerText = Math.round(dS);
                     if (ui.statActDownSol) ui.statActDownSol.innerText = `(${dV.toFixed(2)} SOL)`;
-                    
+
                     const pot = (data.currentVolume || 0) * 0.94;
                     let est = 0;
                     if (data.market) {
@@ -1016,7 +1593,7 @@
                     ui.statPayout.innerText = est.toFixed(3) + " SOL";
                 }
             } catch(e) { console.log("Stats Render Error", e); }
-            
+
             // CRUCIAL: Re-run costs update after new market data (prices/status) is fetched
             updateCosts();
 
@@ -1028,11 +1605,219 @@
             if(ui.statusText) { ui.statusText.innerText = "OFFLINE"; ui.statusText.className = "text-red-500"; }
             updateCosts(); // Still need to run this to handle disabling if offline
         } finally {
-            // Recursive polling with Jitter (0-400ms)
+            // Recursive polling with Jitter
+            // If WebSocket is connected, poll less frequently (fallback only)
+            const baseInterval = (ws && ws.readyState === WebSocket.OPEN) ? 10000 : 2000;
             const jitter = Math.floor(Math.random() * 400);
-            pollTimeout = setTimeout(poll, 2000 + jitter);
+            pollTimeout = setTimeout(poll, baseInterval + jitter);
         }
     }
+
+    // ==================== WEBSOCKET CLIENT ====================
+    function initWebSocket() {
+        // Determine WebSocket URL from API_URL
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsHost = API_URL.includes('localhost')
+            ? 'localhost:3000'
+            : 'asdforecast.onrender.com';
+        const wsUrl = `${wsProtocol}//${wsHost}`;
+
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch (e) {
+            console.error('[WS] Failed to create WebSocket:', e);
+            return;
+        }
+
+        ws.onopen = () => {
+            console.log('[WS] Connected');
+            wsReconnectAttempts = 0;
+
+            // Authenticate with pubKey if connected
+            if (state.pubKey) {
+                ws.send(JSON.stringify({ type: 'AUTH', pubKey: state.pubKey.toString() }));
+            }
+
+            // Update status indicator
+            if (ui.statusText) {
+                ui.statusText.innerText = "LIVE";
+                ui.statusText.className = "text-green-400";
+            }
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                handleWebSocketMessage(msg);
+            } catch (e) {
+                console.error('[WS] Message parse error:', e);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('[WS] Disconnected');
+            ws = null;
+
+            // Reconnect with exponential backoff
+            const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts++), WS_RECONNECT_MAX_DELAY);
+            console.log(`[WS] Reconnecting in ${delay}ms...`);
+            setTimeout(initWebSocket, delay);
+        };
+
+        ws.onerror = (e) => {
+            console.error('[WS] Error:', e);
+        };
+    }
+
+    function handleWebSocketMessage(msg) {
+        const { event, data, ts } = msg;
+
+        switch (event) {
+            case 'STATE':
+                processStateUpdate(data);
+                break;
+            case 'PRICE':
+                // Quick price update (lighter than full state)
+                if (ui.price && data.price) {
+                    ui.price.innerText = data.price.toFixed(2);
+                    if (ui.change && data.change !== undefined) {
+                        const changeClass = data.change >= 0 ? 'text-green-400' : 'text-red-400';
+                        ui.change.innerText = `${data.change >= 0 ? '+' : ''}${data.change.toFixed(4)}%`;
+                        ui.change.className = changeClass;
+                    }
+                }
+                break;
+            case 'FRAME_CLOSE':
+                // Frame result notification
+                console.log('[WS] Frame closed:', data.result, 'Winners:', data.winners);
+                // The STATE update will follow with full data
+                break;
+            case 'SERVER_SHUTDOWN':
+                // Server is shutting down
+                console.warn('[WS] Server shutdown:', data.message);
+                if (ui.statusText) {
+                    ui.statusText.innerText = "MAINTENANCE";
+                    ui.statusText.className = "text-yellow-500 animate-pulse";
+                }
+                if (ui.pauseOverlay) {
+                    ui.pauseOverlay.classList.remove('hidden');
+                }
+                if (ui.pauseText) {
+                    ui.pauseText.innerText = "Server maintenance in progress...";
+                    ui.pauseText.className = "text-yellow-500 font-bold text-xl";
+                }
+                break;
+            default:
+                console.log('[WS] Unknown event:', event);
+        }
+    }
+
+    function processStateUpdate(data) {
+        // Same logic as poll() but from WebSocket
+        if (!ui || !ui.price) return;
+
+        state.isOnline = true;
+        if (ui.statusText) {
+            ui.statusText.innerText = "LIVE";
+            ui.statusText.className = "text-green-400";
+        }
+        if (ui.topStatus) {
+            ui.topStatus.className = "flex items-center gap-2 text-xs font-mono bg-black/40 px-3 py-2 rounded border border-green-900/50 transition-colors duration-500";
+        }
+        if (ui.lastUpdated && data.lastPriceTimestamp) {
+            ui.lastUpdated.innerText = `Price Data: ${new Date(data.lastPriceTimestamp).toLocaleTimeString()}`;
+        }
+        if (data.backendVersion) {
+            ui.backendVersion.innerText = `v${data.backendVersion}`;
+        }
+
+        // --- STATE SYNC (same as poll) ---
+        state.isResetting = data.isResetting;
+        state.isCancelled = data.isCancelled;
+
+        if (data.isResetting) {
+            ui.netSharesHeader.innerText = "CALCULATING RESULTS...";
+            ui.netSharesHeader.classList.add("text-blue-400", "animate-pulse");
+            ui.netSharesHeader.classList.remove("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "RESETTING";
+            ui.statusText.className = "text-blue-400";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "CALCULATING RESULTS...";
+                ui.pauseText.className = "text-blue-400 font-bold text-xl";
+            }
+            ui.timer.innerText = "Resetting...";
+        } else if (data.isCancelled) {
+            ui.netSharesHeader.innerText = "FRAME CANCELLED";
+            ui.netSharesHeader.classList.add("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "CANCELLED";
+            ui.statusText.className = "text-red-500";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "FRAME CANCELLED - funds refunded";
+                ui.pauseText.className = "text-red-500 font-bold text-xl";
+            }
+        } else if (data.isPaused) {
+            ui.netSharesHeader.innerText = "MARKET PAUSED";
+            ui.netSharesHeader.classList.add("text-red-500");
+            ui.pauseOverlay.classList.remove('hidden');
+            ui.statusText.innerText = "PAUSED";
+            ui.statusText.className = "text-yellow-500";
+            if (ui.pauseText) {
+                ui.pauseText.innerText = "MARKET PAUSED";
+                ui.pauseText.className = "text-yellow-500 font-bold text-xl";
+            }
+        } else {
+            ui.netSharesHeader.innerText = "MARKET LIVE";
+            ui.netSharesHeader.classList.remove("text-red-500", "text-blue-400", "animate-pulse");
+            ui.pauseOverlay.classList.add('hidden');
+        }
+
+        // Update prices
+        if (data.price) ui.price.innerText = data.price.toFixed(2);
+        if (data.change !== undefined) {
+            const changeClass = data.change >= 0 ? 'text-green-400' : 'text-red-400';
+            ui.change.innerText = `${data.change >= 0 ? '+' : ''}${data.change.toFixed(4)}%`;
+            ui.change.className = changeClass;
+        }
+
+        // Update market data
+        if (data.market) {
+            state.prices.up = data.market.priceUp;
+            state.prices.down = data.market.priceDown;
+            updateCosts();
+
+            const totalShares = data.market.sharesUp + data.market.sharesDown;
+            const pctUp = Math.round((data.market.sharesUp / totalShares) * 100);
+            const pctDown = 100 - pctUp;
+
+            if (ui.barUp) ui.barUp.style.width = `${pctUp}%`;
+            if (ui.barDown) ui.barDown.style.width = `${pctDown}%`;
+            if (ui.lblSharesUp) ui.lblSharesUp.innerText = Math.floor(data.market.sharesUp);
+            if (ui.lblSharesDown) ui.lblSharesDown.innerText = Math.floor(data.market.sharesDown);
+            if (ui.lblPriceUp) ui.lblPriceUp.innerText = state.prices.up.toFixed(4);
+            if (ui.lblPriceDown) ui.lblPriceDown.innerText = state.prices.down.toFixed(4);
+        }
+
+        // Update frame times
+        if (data.candleStartTime && data.candleEndTime) {
+            state.targetEndTime = data.candleEndTime;
+            if (ui.frameStart) ui.frameStart.innerText = new Date(data.candleStartTime).toLocaleTimeString();
+            if (ui.frameEnd) ui.frameEnd.innerText = new Date(data.candleEndTime).toLocaleTimeString();
+        }
+
+        // Update history if available
+        if (data.history && Array.isArray(data.history)) {
+            state.fullHistory = data.history;
+            renderHistoryTable(data.history);
+        }
+
+        // Update lottery if available
+        if (data.lottery && ui.lotteryPool) {
+            ui.lotteryPool.innerText = (data.lottery.prizePool || 0).toLocaleString();
+        }
+    }
+    // ==================== END WEBSOCKET CLIENT ====================
 
     async function buy(dir) {
 
