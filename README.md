@@ -7,6 +7,8 @@ Prediction market platform on Solana for SOL price movements with ASDF token lot
 - **15-minute price prediction frames** - Bet UP or DOWN on SOL price
 - **Dynamic pricing** - Share prices adjust based on market demand
 - **ASDF Lottery** - Weekly draws for eligible ASDF holders
+- **Referral Flywheel** - 552 SYMMETRY rewards for referrers and referred users
+- **On-chain ASDF price** - Direct price calculation from PumpSwap pool reserves
 - **Sentiment voting** - Daily community sentiment polls
 - **Real-time updates** - Live price feeds via Pyth Oracle
 
@@ -104,7 +106,7 @@ python3 -m http.server 8080
 
 ## Version
 
-- **Backend**: v143.0
+- **Backend**: v147.0
 - **Frontend**: v122.0
 
 ## License

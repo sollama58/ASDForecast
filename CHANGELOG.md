@@ -1,5 +1,113 @@
 # ASDForecast Changelog
 
+## Version 147.0 - On-chain ASDF Price (PumpSwap Pool)
+
+### Overview
+
+This update replaces the Jupiter Price API with direct on-chain price calculation from the PumpSwap liquidity pool. This provides more accurate, real-time pricing based on actual pool reserves.
+
+---
+
+## Changes
+
+### 1. On-chain Price Source
+
+**Pool Configuration:**
+```javascript
+const PUMPSWAP_POOL = {
+    POOL_ADDRESS: "DuhRX5JTPtsWU5n44t8tcFEfmzy2Eu27p4y6z8Rhf2bb",
+    BASE_TOKEN_ACCOUNT: "9NXgzYh3ZhrqiLn994fhkGx7ikAUbEcWux9SGuxyXq2z",   // ASDF reserve
+    QUOTE_TOKEN_ACCOUNT: "HmmH9j2BHmJHQDRGMswBMccMfsr6jknGTux3wFqmXrya",  // SOL reserve
+    BASE_DECIMALS: 6,
+    QUOTE_DECIMALS: 9
+};
+```
+
+**Price Calculation:**
+```
+priceInSol = quoteReserve / baseReserve
+priceInUsd = priceInSol * solPriceUsd
+```
+
+### 2. Startup Validation
+
+- **HELIUS_API_KEY** required at startup (fatal error if missing)
+- **Pool accessibility** validated on boot with test price fetch
+- Clear logging of price data and pool reserves
+
+### 3. Enhanced Price Data
+
+The `getASDF_PriceFromPool()` function now returns:
+```javascript
+{
+    priceInSol: 0.000000870939,
+    priceInUsd: 0.00011854,
+    baseReserve: 181879310,  // ASDF in pool
+    quoteReserve: 158.4,     // SOL in pool
+    timestamp: Date.now()
+}
+```
+
+### 4. API Enhancements
+
+**`/api/referral/stats`** now includes:
+- `priceAvailable: boolean` - Indicates if price is available
+- `priceWarning: string | null` - Warning message if price unavailable
+
+**External stats cache** now includes:
+- `tokenPriceInSol` - ASDF price in SOL
+- `poolReserves.asdf` - ASDF reserve amount
+- `poolReserves.sol` - SOL reserve amount
+
+---
+
+## Files Modified
+
+### server.js
+
+**New Configuration (lines 40-52):**
+- `PUMPSWAP_POOL` constant with pool addresses
+
+**Modified Functions:**
+| Function | Change |
+|----------|--------|
+| `getASDF_PriceFromPool()` | New - reads on-chain pool reserves |
+| `getASDF_Price()` | Now wraps `getASDF_PriceFromPool()` for backward compatibility |
+| `fetchTokenPricesStaggered()` | Uses on-chain price instead of Jupiter API |
+| `loadAndInit()` | Validates pool accessibility on startup |
+
+### New Files
+
+- `scripts/find_asdf_pools.js` - Utility to discover ASDF pools
+- `scripts/find_pumpswap_pool.js` - PumpSwap pool discovery utility
+
+---
+
+## Benefits
+
+| Aspect | Before (Jupiter API) | After (On-chain) |
+|--------|---------------------|------------------|
+| Source | Third-party API | Direct blockchain |
+| Latency | ~500ms | ~200ms |
+| Reliability | API dependent | RPC dependent |
+| Data | Price only | Price + reserves |
+| Cache | 60 seconds | 30 seconds |
+
+---
+
+## Testing
+
+```bash
+# Server startup shows:
+✓ HELIUS_API_KEY loaded (ac94987a...)
+✓ PumpSwap pool validated: 0.000000870939 SOL/ASDF
+> [PRICE] ASDF on-chain: 0.000000870939 SOL ($0.00011854) | Pool: 181,879,310 ASDF / 158.41 SOL
+```
+
+---
+
+---
+
 ## Version 145.0 - Referral Flywheel System (552 SYMMETRY)
 
 ### Overview
